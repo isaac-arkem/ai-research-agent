@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Research Agent</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ease: cubic-bezier(0.25, 1, 0.5, 1);
+      --bg-base: #080808;
+      --bg-field: #0d0d0d;
+      --bg-hover: #181818;
+      --bg-raised: #1e1e1e;
+      --bg-tag: #111827;
+      --border-dark: #1e1e1e;
+      --border-light: #3a3a3a;
+      --text-primary: #e5e5e5;
+      --text-secondary: #838383;
+      --text-subtle: #525252;
+      --text-inverse: #080808;
+      --text-highlighted: #ffffff;
+      --yellow: #e0dd5b;
+      --yellow-hover: #c4c049;
+      --focus: #3b82f6;
+      --danger: #c55f5f;
+      --ok-bg: #16261a;
+      --ok-border: #274d33;
+      --ok-text: #6fbf73;
+      --radius: 4px;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; background: var(--bg-base); color: var(--text-primary); }
+    body {
+      font-family: "IBM Plex Sans", system-ui, sans-serif;
+      font-size: 12px;
+      line-height: 18px;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      flex-direction: column;
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background-color: rgba(120,120,120,0.35); border-radius: 9999px; }
+    * { scrollbar-width: thin; scrollbar-color: rgba(120,120,120,0.35) transparent; }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--radius); }
+
+    .caption {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 10px;
+      line-height: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-subtle);
+      font-weight: 500;
+    }
+
+    header {
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border-dark);
+      background: rgba(8, 8, 8, 0.95);
+      backdrop-filter: blur(8px);
+    }
+    .mark {
+      display: flex;
+      height: 28px;
+      width: 28px;
+      align-items: center;
+      justify-content: center;
+      border-radius: var(--radius);
+      background: var(--yellow);
+      color: var(--text-inverse);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-highlighted);
+    }
+    header p {
+      margin: 0 0 0 auto;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--text-secondary);
+    }
+
+    #log {
+      flex: 1;
+      overflow: auto;
+      padding: 16px;
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+    }
+    .empty {
+      color: var(--text-secondary);
+      padding: 48px 0;
+    }
+    .empty code {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--text-primary);
+      background: var(--bg-tag);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--radius);
+      padding: 2px 6px;
+    }
+
+    .turn { margin-bottom: 16px; animation: colIn 0.4s var(--ease) both; }
+    .turn.user .text {
+      margin-top: 6px;
+      color: var(--text-highlighted);
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    .plan { animation: fade 0.2s var(--ease); }
+    .summary {
+      margin: 0 0 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-highlighted);
+      line-height: 18px;
+    }
+
+    .run {
+      background: var(--bg-field);
+      border: 1px solid var(--border-dark);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .run h2 {
+      margin: 0;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border-dark);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-highlighted);
+    }
+    .run-body { padding: 12px; }
+    .run .rationale {
+      margin: 0 0 12px;
+      color: var(--text-secondary);
+    }
+    .fields {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 16px;
+      margin-bottom: 12px;
+    }
+    @media (max-width: 560px) { .fields { grid-template-columns: 1fr; } }
+    .field dt { margin: 0 0 2px; }
+    .field dd {
+      margin: 0;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--text-primary);
+    }
+    .tags { display: flex; flex-wrap: wrap; gap: 4px; }
+    .tag {
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 10px;
+      color: var(--text-secondary);
+      background: #171717;
+      border: 1px solid var(--border-dark);
+      border-radius: var(--radius);
+      padding: 2px 6px;
+    }
+    .risks {
+      margin: 8px 0 0;
+      padding: 10px 12px;
+      border: 1px solid var(--border-dark);
+      border-radius: var(--radius);
+      background: var(--bg-field);
+      color: var(--text-secondary);
+    }
+    .risks strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--danger);
+    }
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+    .err { color: var(--danger); }
+
+    .loader {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 0;
+      color: var(--text-secondary);
+      animation: fade 0.2s var(--ease);
+    }
+    .loader.on { display: flex; }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 1.5px solid var(--border-light);
+      border-top-color: var(--yellow);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    .cursor {
+      display: inline-block;
+      width: 6px;
+      height: 12px;
+      background: var(--yellow);
+      margin-left: 2px;
+      vertical-align: text-bottom;
+      animation: blink 0.9s step-end infinite;
+    }
+
+    form {
+      flex-shrink: 0;
+      display: flex;
+      gap: 8px;
+      max-width: 720px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 12px 16px 16px;
+      border-top: 1px solid var(--border-dark);
+    }
+    textarea {
+      flex: 1;
+      resize: none;
+      min-height: 44px;
+      max-height: 140px;
+      padding: 10px 12px;
+      border: 1px solid var(--border-dark);
+      border-radius: var(--radius);
+      background: var(--bg-field);
+      color: var(--text-primary);
+      font: inherit;
+    }
+    textarea::placeholder { color: var(--text-subtle); }
+    textarea:focus { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+    button {
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      border: 0;
+      border-radius: var(--radius);
+      background: var(--yellow);
+      color: var(--text-inverse);
+      padding: 0 14px;
+      cursor: pointer;
+      transition: background 0.2s var(--ease), transform 0.12s var(--ease);
+    }
+    button:hover { background: var(--yellow-hover); }
+    button:active { transform: scale(0.95); }
+    button:disabled { opacity: 0.45; cursor: wait; transform: none; }
+    .plan.approved .approve {
+      background: var(--ok-bg);
+      color: var(--ok-text);
+      border: 1px solid var(--ok-border);
+      cursor: default;
+      opacity: 1;
+    }
+
+    @keyframes fade {
+      from { opacity: 0; transform: translateY(-2px); }
+      to { opacity: 1; transform: none; }
+    }
+    @keyframes colIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: none; }
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes blink { 50% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20 L12 4 L20 20"/><path d="M7.5 14 H16.5"/></svg>
+    </span>
+    <h1>Research Agent</h1>
+    <p id="status">Checking server…</p>
+  </header>
+  <div id="log">
+    <div class="empty" id="intro">
+      Ask for a scrape plan. Example:
+      <code>Find modest fashion creators in Saudi Arabia</code>
+    </div>
+  </div>
+  <form id="form">
+    <textarea id="prompt" rows="2" placeholder="What should we research?" autofocus></textarea>
+    <button type="submit" id="go">Ask</button>
+  </form>
+  <script>
+    const log = document.getElementById("log");
+    const intro = document.getElementById("intro");
+    const form = document.getElementById("form");
+    const promptEl = document.getElementById("prompt");
+    const go = document.getElementById("go");
+    const statusEl = document.getElementById("status");
+    const KEY = "research_conversation_id";
+    let conversationId = sessionStorage.getItem(KEY);
+    const conversationHistory = [];
+
+    function el(tag, attrs, children) {
+      const node = document.createElement(tag);
+      Object.entries(attrs || {}).forEach(([k, v]) => {
+        if (k === "class") node.className = v;
+        else if (k === "text") node.textContent = v;
+        else node.setAttribute(k, v);
+      });
+      (children || []).forEach((c) => node.appendChild(c));
+      return node;
+    }
+
+    function field(label, value) {
+      return el("div", { class: "field" }, [
+        el("dt", { class: "caption", text: label }),
+        el("dd", { text: value || "—" }),
+      ]);
+    }
+
+    function hashTags(tags) {
+      const wrap = el("div", { class: "tags" });
+      (tags || []).forEach((t) => {
+        wrap.appendChild(el("span", { class: "tag", text: "#" + String(t).replace(/^#/, "") }));
+      });
+      return wrap;
+    }
+
+    function runCard(run) {
+      const body = el("div", { class: "run-body" }, [
+        el("p", { class: "rationale", text: run.rationale || "" }),
+        el("div", { class: "fields" }, [
+          field("Pipeline", run.pipeline),
+          field("Niche", run.niche),
+          field("Countries", (run.countries || []).join(", ")),
+          field("Platforms", (run.platforms || []).join(", ")),
+          field("Max creators", String(run.max_creators ?? "")),
+          field("Posts per source", String(run.posts_per_source ?? "")),
+        ]),
+      ]);
+      if (run.hashtags && run.hashtags.length) {
+        body.appendChild(el("div", { class: "field" }, [
+          el("dt", { class: "caption", text: "Hashtags" }),
+          hashTags(run.hashtags),
+        ]));
+      }
+      return el("article", { class: "run" }, [
+        el("h2", { text: run.title || "Untitled run" }),
+        body,
+      ]);
+    }
+
+    function accountCard(ref) {
+      return el("article", { class: "run" }, [
+        el("h2", { text: "@" + String(ref.handle || "").replace(/^@/, "") }),
+        el("div", { class: "run-body" }, [
+          el("p", { class: "rationale", text: ref.rationale || "" }),
+          el("div", { class: "fields" }, [
+            field("Pipeline", ref.pipeline),
+            field("Platform", ref.platform),
+            field("Niche", ref.niche),
+            field("Posts per account", String(ref.posts_per_source ?? 10)),
+            field("Lookback period", ref.recency_days == null ? "Any" : ref.recency_days + " days"),
+          ]),
+        ]),
+      ]);
+    }
+
+    function renderPlan(plan) {
+      const wrap = el("div", { class: "plan" });
+      const summary = el("p", { class: "summary" });
+      wrap.appendChild(summary);
+      (plan.recommended_runs || []).forEach((run) => wrap.appendChild(runCard(run)));
+      (plan.reference_accounts || []).forEach((ref) => wrap.appendChild(accountCard(ref)));
+      if (plan.risks && plan.risks.length) {
+        wrap.appendChild(el("div", { class: "risks" }, [
+          el("strong", { class: "caption", text: "Risks" }),
+          el("div", { text: plan.risks.join(" ") }),
+        ]));
+      }
+      const hasPlan = (plan.recommended_runs && plan.recommended_runs.length)
+        || (plan.reference_accounts && plan.reference_accounts.length);
+      if (hasPlan) {
+        const approve = el("button", { class: "approve", type: "button", text: "Approve" });
+        approve.addEventListener("click", () => {
+          wrap.classList.add("approved");
+          approve.textContent = "Approved";
+          approve.disabled = true;
+        });
+        wrap.appendChild(el("div", { class: "actions" }, [approve]));
+      }
+      return { wrap, summary };
+    }
+
+    function sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async function streamText(node, text) {
+      node.textContent = "";
+      const cursor = el("span", { class: "cursor" });
+      node.appendChild(cursor);
+      const pace = text.length > 160 ? 8 : 14;
+      for (const ch of text) {
+        cursor.before(document.createTextNode(ch));
+        log.scrollTop = log.scrollHeight;
+        await sleep(pace);
+      }
+      cursor.remove();
+    }
+
+    function showLoader() {
+      const node = el("div", { class: "loader on" }, [
+        el("span", { class: "spinner" }),
+        el("span", { class: "caption", text: "Building plan" }),
+      ]);
+      log.appendChild(node);
+      log.scrollTop = log.scrollHeight;
+      return node;
+    }
+
+    async function loadHealth() {
+      try {
+        const r = await fetch("/health");
+        const j = await r.json();
+        statusEl.textContent = `${j.markets} markets · db ${j.db_connected ? "on" : "fallback"}`;
+      } catch (e) {
+        statusEl.textContent = "Server unreachable";
+      }
+    }
+
+    form.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const prompt = promptEl.value.trim();
+      if (!prompt) return;
+      if (intro) intro.remove();
+      log.appendChild(el("div", { class: "turn user" }, [
+        el("div", { class: "caption", text: "You" }),
+        el("div", { class: "text", text: prompt }),
+      ]));
+      promptEl.value = "";
+      go.disabled = true;
+      const loader = showLoader();
+      const body = {
+        prompt,
+        conversation_history: conversationHistory.slice(),
+      };
+      if (conversationId) body.conversation_id = conversationId;
+      conversationHistory.push({ role: "user", content: prompt });
+      try {
+        const r = await fetch("/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        loader.remove();
+        if (!r.ok) {
+          log.appendChild(el("div", { class: "err", text: data.error || r.statusText }));
+        } else {
+          if (data.conversation_id) {
+            conversationId = data.conversation_id;
+            sessionStorage.setItem(KEY, conversationId);
+          }
+          if (data.clarifying_question) {
+            const cqWrap = el("div", { class: "turn" });
+            const cqText = el("p", { class: "summary" });
+            cqWrap.appendChild(cqText);
+            if (data.understood_so_far) {
+              cqWrap.appendChild(el("p", { class: "rationale", text: data.understood_so_far, style: "color: var(--text-secondary); margin: 4px 0 8px;" }));
+            }
+            if (data.missing_fields && data.missing_fields.length) {
+              const tagsWrap = el("div", { class: "tags", style: "margin-top: 6px;" });
+              data.missing_fields.forEach((f) => tagsWrap.appendChild(el("span", { class: "tag", text: f })));
+              cqWrap.appendChild(el("div", { class: "field", style: "margin-top: 8px;" }, [
+                el("dt", { class: "caption", text: "Missing" }),
+                tagsWrap,
+              ]));
+            }
+            log.appendChild(cqWrap);
+            await streamText(cqText, data.clarifying_question);
+            conversationHistory.push({
+              role: "assistant",
+              content: data.clarifying_question,
+            });
+          } else {
+            const plan = data.plan || {};
+            const { wrap, summary } = renderPlan(plan);
+            const runs = [...wrap.querySelectorAll(".run, .risks, .actions")];
+            runs.forEach((n) => { n.style.opacity = "0"; });
+            log.appendChild(wrap);
+            await streamText(summary, plan.summary || "");
+            for (const n of runs) {
+              n.style.transition = "opacity 0.3s var(--ease)";
+              n.style.opacity = "1";
+              log.scrollTop = log.scrollHeight;
+              await sleep(80);
+            }
+            conversationHistory.push({
+              role: "assistant",
+              content: JSON.stringify({
+                summary: plan.summary,
+                recommended_runs: plan.recommended_runs,
+                reference_accounts: plan.reference_accounts,
+                risks: plan.risks,
+              }),
+            });
+          }
+        }
+      } catch (err) {
+        loader.remove();
+        log.appendChild(el("div", { class: "err", text: String(err) }));
+      } finally {
+        go.disabled = false;
+        log.scrollTop = log.scrollHeight;
+        promptEl.focus();
+      }
+    });
+
+    promptEl.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        form.requestSubmit();
+      }
+    });
+
+    loadHealth();
+  </script>
+</body>
+</html>
