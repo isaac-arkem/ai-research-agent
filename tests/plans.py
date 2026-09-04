@@ -67,14 +67,14 @@ def reference_plan() -> ResearchPlan:
         reference_accounts=[
             ReferenceAccount(
                 pipeline="reference_profiles",
-                handle="khloekardashian",
+                handles=["khloekardashian"],
                 platform="instagram",
                 niche="fashion_beauty",
                 rationale="Named by the operator.",
             ),
             ReferenceAccount(
                 pipeline="reference_profiles",
-                handle="charlidamelio",
+                handles=["charlidamelio"],
                 platform="tiktok",
                 niche="music_dance",
                 rationale="Named by the operator.",

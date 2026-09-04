@@ -12,6 +12,7 @@
 from typing import Dict, List, Optional, Sequence, Union
 
 from app.models.domain import AgentContext, ChatTurn
+from app.services.known_accounts import KnownAccount, shared_job_niche
 
 
 # ── Block 1: Identity ────────────────────────────────────────────────
@@ -89,10 +90,16 @@ FLOW 3 — REFERENCE ("scrape these accounts")
 Story: "Scrape @khloekardashian on Instagram and @charlidamelio on TikTok"
 - Intent: the operator already has handles
 - Output: reference_accounts with pipeline reference_profiles (not recommended_runs)
-- THREE fields are required from the operator: handle, platform, and niche.
+- Required: handle(s), platform, and ONE job niche.
 - Country is NOT needed for reference profiles — do not ask for it.
-- If any of handle, platform, or niche is missing, ask the operator in one clarifying question.
+- Niche is job-wide, unlike platform. If ANY named handle is in KNOWN ACCOUNTS with a niche, use that niche for EVERY handle in this request — including handles you just added that are not in the catalog. Do NOT ask for a second niche. Log an assumption that new handles inherit the catalog niche.
+- Platform can still differ per handle. Put every catalog platform onto the one job. If a named handle is NOT in the catalog and the operator did not say TikTok or Instagram, you MUST return the clarifying_question JSON now. Do not produce a ResearchPlan. Do not write "a clarifying question is needed" into assumptions, summary, or rationale. Do not copy another handle's platforms onto the unknown handle.
+- If the catalog has the handle but no niche, and no other named handle supplies a niche, ask once for the job niche.
+- If no named handle is in the catalog, ask for platform and niche as usual.
+- If handles, platform, or niche is still missing after the catalog lookup, ask the operator in one clarifying question.
 - Posts per account (posts_per_source) and lookback period (recency_days) can use defaults.
+- max_creators does NOT apply. Do not invent per-handle settings.
+- Put every named handle into ONE reference_accounts entry (shared niche, posts_per_source, recency_days, rationale). platforms is an array — list tiktok and instagram together when both apply. Never emit a second reference_accounts object.
 - Do not invent extra discovery runs unless they also asked to find similar creators
 
 If the question has NOTHING to do with social listening, creators, scraping, or content research (e.g. "hello", "how are you", "what is the weather"), it is OFF-TOPIC — return the off-topic JSON immediately. Do not treat greetings or small talk as vague research questions.
@@ -111,7 +118,7 @@ Turn country names, nicknames, and regions into the supported market codes shown
 Step 3 — RESOLVE PLATFORM
 - If the operator specifies a platform (or an alias like "TT", "IG", "reels"), use it.
 - FLOW 1 or FLOW 2 (discovery): if no platform is mentioned, DO NOT default to both. Return a clarifying_question asking which platform to search.
-- FLOW 3 (reference profiles): if the handle is given without a platform, ask which platform the account is on.
+- FLOW 3 (reference profiles): if handles are given without a platform, use the catalog row when the handle is in KNOWN ACCOUNTS. Put every catalog platform onto the one job. If any named handle is not in the catalog and the operator did not name a platform, return ONLY the clarifying_question JSON. Do not guess. Do not copy catalog platforms onto that handle.
 
 Step 4 — GENERATE HASHTAGS
 This is the most valuable part of the plan. Generate 3–8 hashtags per country that are:
@@ -122,7 +129,7 @@ This is the most valuable part of the plan. Generate 3–8 hashtags per country 
 Step 5 — PICK A NICHE LABEL
 - If the operator's question clearly maps to a niche (e.g. "modest fashion", "fitness"), check the taxonomy. If an existing slug fits, use it. If nothing fits, create a new slug: lowercase letters, numbers, underscores only.
 - If the niche is ambiguous or too broad to classify (FLOW 1 or FLOW 2), return a clarifying_question asking the operator to specify.
-- FLOW 3 (reference profiles) requires niche from the operator — ask if not provided.
+- FLOW 3 (reference profiles) requires one job niche — take it from KNOWN ACCOUNTS when ANY named handle in this request already has one, and apply it to the handles you just added. Ask only when no named handle supplies a niche.
 
 Step 6 — CHOOSE SCRAPE SETTINGS
 Use these defaults based on the goal:
@@ -168,12 +175,14 @@ Respond with a single JSON object matching this exact schema. No preamble, no ma
   "reference_accounts": [
     {
       "pipeline": "reference_profiles",
-      "handle": "username",
-      "platform": "tiktok" or "instagram",
+      "handles": ["isaac", "ernest"],
+      "platforms": ["tiktok" and/or "instagram"],
+      "handle_platforms": {"isaac": "tiktok", "ernest": "instagram"},
       "niche": "lowercase_underscore slug",
       "posts_per_source": 1-200 (default: 10),
       "recency_days": "any" | positive integer (default: "any"),
-      "rationale": "why this account"
+      "title": "human-readable job label",
+      "rationale": "why this scrape"
     }
   ],
   "patterns_to_watch": ["specific observation to look for in results"],
@@ -189,8 +198,9 @@ HARD RULES:
 5. platforms must contain only "tiktok" and/or "instagram".
 6. niche must be a valid slug: lowercase letters, numbers, underscores.
 7. hashtags must not be empty — at least 3 per run.
-8. recommended_runs must have at least one entry (unless off-topic).
+8. recommended_runs must have at least one entry unless the plan is off-topic or reference-only (reference_accounts populated, recommended_runs empty).
 9. All string fields must be non-empty.
+10. Named-account scrapes are ONE job. Put every handle and every platform on a single reference_accounts object (handles array, platforms array, ONE shared niche / posts_per_source / recency_days). Niche is not listed per handle and is not split like platforms. When handles sit on different platforms, set handle_platforms with lowercase "tiktok" or "instagram" values. Omit handle_platforms when every handle shares the same platform. Never emit one object per handle, per platform, or per niche.
 
 OFF-TOPIC HANDLING:
 If the question has nothing to do with social listening, creator research, or content strategy, return:
@@ -223,17 +233,17 @@ When required fields are missing, return ONLY this JSON — do not return a Rese
   "understood_so_far": "What you already know from their question.",
   "missing_fields": ["platform", "country", "niche"]
 }
-IMPORTANT: You must choose ONE format per response — either a clarifying_question JSON OR a ResearchPlan JSON. NEVER mix them. Never put question text into plan fields like platform, niche, or handle.
+IMPORTANT: You must choose ONE format per response — either a clarifying_question JSON OR a ResearchPlan JSON. NEVER mix them. Never put question text into plan fields like platform, niche, handle, summary, assumptions, or rationale.
 
 Required fields by flow:
 - FLOW 1 / FLOW 2: platform, country, and niche. If any are missing, return clarifying_question.
-- FLOW 3: handle, platform, and niche. Country is NOT needed. If any are missing, return clarifying_question.
+- FLOW 3: handles, platform, and one job niche. Country is NOT needed. Use a catalog niche for the whole job when ANY named handle has one — new handles inherit it. If a handle is not in the catalog and the operator did not name a platform, return clarifying_question — do not emit a plan. If niche is still missing after that, return clarifying_question.
 
 Only list the fields that are actually missing. Ask for all missing fields in one question — do not ask one at a time. Once the operator answers, produce the full ResearchPlan JSON.
 
 FOLLOW-UP AFTER CLARIFYING QUESTION:
 When the conversation history shows you previously asked a clarifying question, treat the operator's next message as an answer to that question — NOT as a brand new request. Combine what you already understood (from the original question) with the new details they just provided.
-- FLOW 3 (reference profiles): once you have handle, platform, and niche, IMMEDIATELY produce the full ResearchPlan JSON. Do NOT ask for country — it is not needed. If only niche is missing, ask for it. If you have all three, produce the plan.
+- FLOW 3 (reference profiles): once you have handles, platform, and a job niche (from the operator or inherited from KNOWN ACCOUNTS), IMMEDIATELY produce the full ResearchPlan JSON. Do NOT ask for country — it is not needed. Do NOT ask for niche when any named handle already has one in the catalog — apply that niche to handles added in this request. If only niche is missing, ask for it. One reference_accounts entry — handles and platforms listed together, one niche.
 - FLOW 1 or FLOW 2: if they answered some but not all missing fields (platform, country, niche), ask again for just the remaining ones.
 - If the country they provide is unsupported, tell them it is unsupported and ask them to pick a supported one — do NOT discard the rest of the context from the original question.
 - Once all required fields are provided, produce the full ResearchPlan JSON using the combined context from the entire conversation.
@@ -280,12 +290,63 @@ def _build_taxonomy_block(ctx: AgentContext) -> str:
     )
 
 
-def assemble_system_prompt(ctx: AgentContext) -> str:
-    """Stitch all blocks into the final system prompt.
-    Called once per request — the dynamic parts (markets, taxonomy)
-    come from the context object."""
+def _build_known_accounts_block(accounts: Optional[Sequence[KnownAccount]]) -> Optional[str]:
+    if not accounts:
+        return None
+    lines = []
+    for account in accounts:
+        niche = account.niche or "(no niche on this row)"
+        lines.append(f"@{account.handle} | {account.platform} | {niche}")
+    job_niche = shared_job_niche(accounts)
+    if job_niche:
+        inherit = (
+            f"SHARED JOB NICHE: {job_niche}\n"
+            "Apply this niche to EVERY handle in the current request, including "
+            "handles that are not in this catalog list. Niche is job-wide — do "
+            "not ask for another niche, and do not emit a second "
+            "reference_accounts object because a new handle has no catalog row. "
+            "Do not copy this handle's platforms onto a handle that is not listed here. "
+        )
+    else:
+        inherit = (
+            "No catalog row in this list has a niche. Ask once for the job "
+            "niche — not once per handle. "
+        )
+    return (
+        "CONTEXT — KNOWN ACCOUNTS ALREADY IN THE CATALOG:\n"
+        "These handles were found in reference_accounts. For FLOW 3, use each "
+        "row's platform. "
+        f"{inherit}"
+        "Log an assumption that catalog fields came from the catalog.\n\n"
+        + "\n".join(lines)
+    )
 
-    return "\n\n".join([
+
+def _build_missing_platform_block(handles: Optional[Sequence[str]]) -> Optional[str]:
+    if not handles:
+        return None
+    labels = ", ".join(f"@{handle}" for handle in handles)
+    return (
+        "CONTEXT — HANDLES NOT IN THE CATALOG:\n"
+        f"{labels}\n"
+        "These handles have no catalog platform, and the operator did not name "
+        "TikTok or Instagram. You MUST return ONLY the clarifying_question JSON "
+        "asking which platform each of them is on. Do NOT return a ResearchPlan. "
+        "Do NOT copy another handle's platforms onto them. Niche may already be "
+        "known from SHARED JOB NICHE — do not ask for niche."
+    )
+
+
+def assemble_system_prompt(
+    ctx: AgentContext,
+    known_accounts: Optional[Sequence[KnownAccount]] = None,
+    handles_needing_platform: Optional[Sequence[str]] = None,
+) -> str:
+    """Stitch all blocks into the final system prompt.
+    Called once per request — the dynamic parts (markets, taxonomy, known
+    accounts) come from the context object and a catalog lookup."""
+
+    blocks = [
         IDENTITY,
         _build_markets_block(ctx),
         _build_aliases_block(ctx),
@@ -295,9 +356,12 @@ def assemble_system_prompt(ctx: AgentContext) -> str:
         PARAMETER_LIMITS,
         _build_taxonomy_block(ctx),
         APPEARANCE_TRAITS,
+        _build_known_accounts_block(known_accounts),
+        _build_missing_platform_block(handles_needing_platform),
         REASONING,
         OUTPUT_SCHEMA,
-    ])
+    ]
+    return "\n\n".join(block for block in blocks if block)
 
 
 def build_user_message(sanitized_prompt: str, *, is_followup: bool = False) -> str:

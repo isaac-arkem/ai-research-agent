@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 FlowName = Literal["discovery", "deep_research", "reference", "mixed", "off_topic"]
@@ -50,22 +50,88 @@ class RecommendedRun(BaseModel):
 
 
 class ReferenceAccount(BaseModel):
-    """A specific account the agent is recommending we scrape directly.
-    Maps to the 'reference_profiles' pipeline — scrapes known accounts."""
+    """One account-scrape job.
+
+    Maps to the 'reference_profiles' pipeline. Posts-per-account, lookback,
+    and niche are job-wide. Handles and platforms are listed together on this
+    one object — never split into extra entries. max_creators does not apply.
+    """
 
     pipeline: Literal["reference_profiles"]
-    handle: str = Field(min_length=1)
-    platform: Literal["tiktok", "instagram"]
+    handles: List[str] = Field(min_length=1)
+    platforms: List[Literal["tiktok", "instagram"]] = Field(min_length=1)
     niche: str
     posts_per_source: int = Field(default=10, ge=1, le=200)
     recency_days: Optional[int] = None
+    title: Optional[str] = None
     rationale: str = Field(min_length=1)
+    handle_platforms: Optional[Dict[str, Literal["tiktok", "instagram"]]] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_legacy_shape(cls, data):
+        if not isinstance(data, dict):
+            return data
+        handles = data.get("handles")
+        if not handles and data.get("handle"):
+            handles = [data["handle"]]
+        if isinstance(handles, str):
+            handles = [handles]
+        cleaned = []
+        if isinstance(handles, list):
+            for item in handles:
+                h = str(item).strip().lstrip("@")
+                if h:
+                    cleaned.append(h)
+        platforms = data.get("platforms")
+        if not platforms and data.get("platform"):
+            platforms = [data["platform"]]
+        if isinstance(platforms, str):
+            platforms = [platforms]
+        plat_list = []
+        seen = set()
+        if isinstance(platforms, list):
+            for item in platforms:
+                p = str(item).strip().lower()
+                if p in ("tiktok", "instagram") and p not in seen:
+                    seen.add(p)
+                    plat_list.append(p)
+        pairing = data.get("handle_platforms")
+        if not isinstance(pairing, dict):
+            pairing = {}
+        cleaned_pair = {}
+        for key, value in pairing.items():
+            handle = str(key).strip().lstrip("@")
+            if isinstance(value, list) and value:
+                value = value[0]
+            plat = str(value).strip().lower()
+            if handle and plat in ("tiktok", "instagram"):
+                cleaned_pair[handle] = plat
+        if len(plat_list) == 1:
+            for h in cleaned:
+                cleaned_pair.setdefault(h, plat_list[0])
+        recency = data.get("recency_days")
+        if isinstance(recency, str) and recency.strip().lower() in ("any", "null", "none"):
+            data = {**data, "recency_days": None}
+        data = {**data, "handles": cleaned, "platforms": plat_list}
+        if cleaned_pair:
+            data["handle_platforms"] = cleaned_pair
+        else:
+            data.pop("handle_platforms", None)
+        return data
 
     @field_validator("niche")
     @classmethod
     def niche_must_be_slug(cls, v: str) -> str:
         if not re.match(r"^[a-z0-9_]+$", v):
             raise ValueError("niche must be lowercase letters, numbers, and underscores only")
+        return v
+
+    @field_validator("recency_days")
+    @classmethod
+    def recency_must_be_positive(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 1:
+            raise ValueError("recency_days must be a positive number or null")
         return v
 
 
@@ -80,6 +146,76 @@ class ResearchPlan(BaseModel):
     patterns_to_watch: List[str]
     content_angles: List[str]
     risks: List[str]
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_string_lists(cls, data):
+        if not isinstance(data, dict):
+            return data
+        for field in ("assumptions", "patterns_to_watch", "content_angles", "risks"):
+            items = data.get(field)
+            if not isinstance(items, list):
+                continue
+            cleaned = []
+            for item in items:
+                if isinstance(item, str):
+                    if item.strip():
+                        cleaned.append(item.strip())
+                elif isinstance(item, dict):
+                    text = (
+                        item.get("text")
+                        or item.get("value")
+                        or item.get("note")
+                        or "; ".join(str(v) for v in item.values() if v)
+                    )
+                    if text:
+                        cleaned.append(str(text))
+                elif item is not None:
+                    cleaned.append(str(item))
+            data[field] = cleaned
+        return data
+
+    @model_validator(mode="after")
+    def collapse_into_one_job(self):
+        """Account scrapes are one job: merge every row onto the first."""
+        if len(self.reference_accounts) <= 1:
+            return self
+        first = self.reference_accounts[0]
+        handles: List[str] = []
+        seen_h = set()
+        platforms: List[str] = []
+        seen_p = set()
+        pairing: Dict[str, Literal["tiktok", "instagram"]] = dict(
+            first.handle_platforms or {}
+        )
+        niche = first.niche
+        for account in self.reference_accounts:
+            if not niche and account.niche:
+                niche = account.niche
+            default_plat = account.platforms[0] if len(account.platforms) == 1 else None
+            for handle in account.handles:
+                key = handle.lower()
+                if key not in seen_h:
+                    seen_h.add(key)
+                    handles.append(handle)
+                plat = (account.handle_platforms or {}).get(handle) or default_plat
+                if plat:
+                    pairing[handle] = plat
+            for plat in account.platforms:
+                if plat not in seen_p:
+                    seen_p.add(plat)
+                    platforms.append(plat)
+        self.reference_accounts = [
+            first.model_copy(
+                update={
+                    "handles": handles,
+                    "platforms": platforms,
+                    "niche": niche,
+                    "handle_platforms": pairing or None,
+                }
+            )
+        ]
+        return self
 
 
 # ── Internal tracking objects ────────────────────────────────────────

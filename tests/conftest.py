@@ -18,6 +18,7 @@ def isolate(monkeypatch):
     mem = MemoryConversationStore()
     monkeypatch.setattr(conversation_service, "store", mem)
     monkeypatch.setattr("app.services.audit.get_supabase_admin", lambda *a, **k: None)
+    monkeypatch.setattr("app.services.known_accounts.get_supabase_admin", lambda *a, **k: None)
     yield
     limiter.reset()
     app.dependency_overrides.clear()

@@ -44,6 +44,9 @@ def test_system_prompt_does_not_suggest_substitute_markets():
     assert "Do not suggest, substitute, or invent another market." in prompt
     assert "UNSUPPORTED MARKET HANDLING:" in prompt
     assert '"recommended_runs": []' in prompt
+    assert '"handles": ["isaac", "ernest"]' in prompt
+    assert "Never emit one object per handle, per platform, or per niche" in prompt
+    assert "handle_platforms" in prompt
 
 
 def test_empty_plan_json_is_valid_for_unsupported_market():

@@ -88,3 +88,16 @@ class ConversationResponse(BaseModel):
     id: str
     title: Optional[str] = None
     messages: List[ConversationMessage] = Field(default_factory=list)
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ConversationSummary(BaseModel):
+    id: str
+    title: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class ConversationListResponse(BaseModel):
+    conversations: List[ConversationSummary] = Field(default_factory=list)

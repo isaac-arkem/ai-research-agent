@@ -4,6 +4,7 @@
 # Services contain the business logic — they don't know about HTTP,
 # they just know how to do things:
 #
+#   known_accounts.py → lookup named handles in reference_accounts
 #   prompt.py         → system prompt + OpenAI chat messages
 #   validator.py      → plan quality gate
 #   flows.py          → classify 3 operator flows and translate pipeline params

@@ -364,13 +364,17 @@
     }
 
     function accountCard(ref) {
+      const handles = (ref.handles && ref.handles.length)
+        ? ref.handles
+        : (ref.handle ? [ref.handle] : []);
+      const label = handles.map((h) => "@" + String(h).replace(/^@/, "")).join("  ");
       return el("article", { class: "run" }, [
-        el("h2", { text: "@" + String(ref.handle || "").replace(/^@/, "") }),
+        el("h2", { text: label || "Named accounts" }),
         el("div", { class: "run-body" }, [
           el("p", { class: "rationale", text: ref.rationale || "" }),
           el("div", { class: "fields" }, [
             field("Pipeline", ref.pipeline),
-            field("Platform", ref.platform),
+            field("Platforms", (ref.platforms && ref.platforms.length ? ref.platforms : [ref.platform]).filter(Boolean).join(", ")),
             field("Niche", ref.niche),
             field("Posts per account", String(ref.posts_per_source ?? 10)),
             field("Lookback period", ref.recency_days == null ? "Any" : ref.recency_days + " days"),
@@ -379,12 +383,39 @@
       ]);
     }
 
+    function collapseRefs(refs) {
+      if (!refs || refs.length <= 1) return refs || [];
+      const first = Object.assign({}, refs[0]);
+      const handles = [];
+      const seenH = {};
+      const platforms = [];
+      const seenP = {};
+      refs.forEach((ref) => {
+        const hs = (ref.handles && ref.handles.length)
+          ? ref.handles
+          : (ref.handle ? [ref.handle] : []);
+        const ps = (ref.platforms && ref.platforms.length)
+          ? ref.platforms
+          : (ref.platform ? [ref.platform] : []);
+        hs.forEach((h) => {
+          const key = String(h).toLowerCase();
+          if (!seenH[key]) { seenH[key] = true; handles.push(h); }
+        });
+        ps.forEach((p) => {
+          if (p && !seenP[p]) { seenP[p] = true; platforms.push(p); }
+        });
+      });
+      first.handles = handles;
+      first.platforms = platforms;
+      return [first];
+    }
+
     function renderPlan(plan) {
       const wrap = el("div", { class: "plan" });
       const summary = el("p", { class: "summary" });
       wrap.appendChild(summary);
       (plan.recommended_runs || []).forEach((run) => wrap.appendChild(runCard(run)));
-      (plan.reference_accounts || []).forEach((ref) => wrap.appendChild(accountCard(ref)));
+      collapseRefs(plan.reference_accounts).forEach((ref) => wrap.appendChild(accountCard(ref)));
       if (plan.risks && plan.risks.length) {
         wrap.appendChild(el("div", { class: "risks" }, [
           el("strong", { class: "caption", text: "Risks" }),

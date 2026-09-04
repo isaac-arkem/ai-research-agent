@@ -16,10 +16,13 @@
 #   8. recommended_runs must have at least one entry (unless off-topic)
 #   9. All string fields must be non-empty
 
+import logging
 import re
-from typing import List, Set
+from typing import Dict, List, Set
 
 from app.models.domain import ResearchPlan, ValidationError_, ValidationResult
+
+logger = logging.getLogger(__name__)
 
 
 VALID_MAX_CREATORS = {5, 10, 20, 50, 100, 200}
@@ -121,9 +124,14 @@ def validate_research_plan(
         if not isinstance(platforms, list) or len(platforms) == 0:
             errors.append(ValidationError_(rule=5, field=f"{prefix}.platforms", message="platforms must be a non-empty array"))
         else:
+            cleaned_run_plats = []
             for p in platforms:
-                if p not in VALID_PLATFORMS:
+                plat = str(p).strip().lower()
+                if plat not in VALID_PLATFORMS:
                     errors.append(ValidationError_(rule=5, field=f"{prefix}.platforms", message=f'invalid platform "{p}"'))
+                elif plat not in cleaned_run_plats:
+                    cleaned_run_plats.append(plat)
+            run["platforms"] = cleaned_run_plats
 
         # Rule 6: niche slug
         niche = run.get("niche", "")
@@ -143,7 +151,7 @@ def validate_research_plan(
 
         # Rule 4: recency_days (if present)
         recency = run.get("recency_days")
-        if recency == "any":
+        if isinstance(recency, str) and recency.strip().lower() in ("any", "null", "none"):
             run["recency_days"] = None
         elif recency is not None:
             if not isinstance(recency, int) or recency < 1:
@@ -162,14 +170,58 @@ def validate_research_plan(
         if ref.get("pipeline") != "reference_profiles":
             errors.append(ValidationError_(rule=2, field=f"{prefix}.pipeline", message=f'pipeline must be "reference_profiles", got "{ref.get("pipeline")}"'))
 
-        # Rule 9: handle
-        handle = ref.get("handle", "")
-        if not isinstance(handle, str) or not handle.strip():
-            errors.append(ValidationError_(rule=9, field=f"{prefix}.handle", message="handle must be a non-empty string"))
+        # Rule 9: handles — one or more usernames sharing this job's settings
+        handles = ref.get("handles")
+        if not handles and ref.get("handle"):
+            handles = [ref.get("handle")]
+            ref["handles"] = handles
+        if not isinstance(handles, list) or len(handles) == 0:
+            errors.append(ValidationError_(rule=9, field=f"{prefix}.handles", message="handles must be a non-empty array of usernames"))
+        else:
+            cleaned = []
+            for h in handles:
+                if not isinstance(h, str) or not h.strip():
+                    errors.append(ValidationError_(rule=9, field=f"{prefix}.handles", message="each handle must be a non-empty string"))
+                    break
+                cleaned.append(h.strip().lstrip("@"))
+            else:
+                ref["handles"] = cleaned
 
-        # Rule 5: platform
-        if ref.get("platform") not in VALID_PLATFORMS:
-            errors.append(ValidationError_(rule=5, field=f"{prefix}.platform", message=f'invalid platform "{ref.get("platform")}"'))
+        # Rule 5: platforms — array, or legacy singular platform
+        platforms = ref.get("platforms")
+        if not platforms and ref.get("platform"):
+            platforms = [ref.get("platform")]
+        if isinstance(platforms, str):
+            platforms = [platforms]
+        if not isinstance(platforms, list) or len(platforms) == 0:
+            errors.append(ValidationError_(rule=5, field=f"{prefix}.platforms", message="platforms must be a non-empty array"))
+        else:
+            cleaned_plats = []
+            for p in platforms:
+                plat = str(p).strip().lower()
+                if plat not in VALID_PLATFORMS:
+                    errors.append(ValidationError_(rule=5, field=f"{prefix}.platforms", message=f'invalid platform "{p}"'))
+                elif plat not in cleaned_plats:
+                    cleaned_plats.append(plat)
+            ref["platforms"] = cleaned_plats
+            ref.pop("platform", None)
+            pairing = ref.get("handle_platforms")
+            if isinstance(pairing, dict):
+                cleaned_pair = {}
+                for key, value in pairing.items():
+                    handle = str(key).strip().lstrip("@")
+                    if isinstance(value, list) and value:
+                        value = value[0]
+                    plat = str(value).strip().lower()
+                    if handle and plat in VALID_PLATFORMS:
+                        cleaned_pair[handle] = plat
+                if len(cleaned_plats) == 1:
+                    for h in ref.get("handles") or []:
+                        cleaned_pair.setdefault(str(h), cleaned_plats[0])
+                if cleaned_pair:
+                    ref["handle_platforms"] = cleaned_pair
+                else:
+                    ref.pop("handle_platforms", None)
 
         # Rule 6: niche
         niche = ref.get("niche", "")
@@ -184,7 +236,7 @@ def validate_research_plan(
 
         # Rule 4: recency_days (optional)
         recency = ref.get("recency_days")
-        if recency == "any":
+        if isinstance(recency, str) and recency.strip().lower() in ("any", "null", "none"):
             ref["recency_days"] = None
         elif recency is not None:
             if not isinstance(recency, int) or recency < 1:
@@ -195,7 +247,69 @@ def validate_research_plan(
         if not isinstance(rationale, str) or not rationale.strip():
             errors.append(ValidationError_(rule=9, field=f"{prefix}.rationale", message="rationale must be a non-empty string"))
 
+    if not errors:
+        raw["reference_accounts"] = _merge_reference_jobs(refs)
+
     return _finalise(raw, errors)
+
+
+def _ref_platforms(ref: dict) -> List[str]:
+    platforms = ref.get("platforms")
+    if not platforms and ref.get("platform"):
+        platforms = [ref.get("platform")]
+    if isinstance(platforms, str):
+        platforms = [platforms]
+    if not isinstance(platforms, list):
+        return []
+    out = []
+    for p in platforms:
+        if p in VALID_PLATFORMS and p not in out:
+            out.append(p)
+    return out
+
+
+def _merge_reference_jobs(refs: List) -> List:
+    """Account scrapes are one job: one row, all handles, all platforms."""
+    dicts = [ref for ref in refs if isinstance(ref, dict)]
+    others = [ref for ref in refs if not isinstance(ref, dict)]
+    if not dicts:
+        return refs
+    first = {**dicts[0]}
+    handles: List = []
+    seen_h = set()
+    platforms: List[str] = []
+    seen_p = set()
+    pairing = dict(first.get("handle_platforms") or {}) if isinstance(first.get("handle_platforms"), dict) else {}
+    niche = first.get("niche") if isinstance(first.get("niche"), str) else None
+    for ref in dicts:
+        candidate = ref.get("niche")
+        if not niche and isinstance(candidate, str) and candidate.strip():
+            niche = candidate.strip()
+        hlist = ref.get("handles") if isinstance(ref.get("handles"), list) else []
+        plats = _ref_platforms(ref)
+        existing_pair = ref.get("handle_platforms") if isinstance(ref.get("handle_platforms"), dict) else {}
+        default_plat = plats[0] if len(plats) == 1 else None
+        for handle in hlist:
+            key = str(handle).lower()
+            if key not in seen_h:
+                seen_h.add(key)
+                handles.append(handle)
+            plat = existing_pair.get(handle) or existing_pair.get(key) or default_plat
+            if plat:
+                pairing[str(handle)] = plat
+        for plat in plats:
+            if plat not in seen_p:
+                seen_p.add(plat)
+                platforms.append(plat)
+    first["handles"] = handles
+    first["platforms"] = platforms
+    if niche:
+        first["niche"] = niche
+    first.pop("platform", None)
+    first.pop("handle", None)
+    if pairing:
+        first["handle_platforms"] = pairing
+    return [first, *others]
 
 
 def _finalise(raw: dict, errors: List[ValidationError_]) -> ValidationResult:
@@ -204,6 +318,13 @@ def _finalise(raw: dict, errors: List[ValidationError_]) -> ValidationResult:
     if not errors:
         try:
             plan = ResearchPlan(**raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("ResearchPlan parse failed after field checks: %s", exc)
+            errors.append(
+                ValidationError_(
+                    rule=0,
+                    field="plan",
+                    message=f"plan could not be parsed: {exc}",
+                )
+            )
     return ValidationResult(valid=len(errors) == 0, errors=errors, plan=plan)

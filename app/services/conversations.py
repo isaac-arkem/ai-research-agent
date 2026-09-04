@@ -10,7 +10,11 @@ from uuid import uuid4
 
 from app.core.supabase import get_supabase_admin
 from app.models.domain import ChatTurn, ResearchPlan
-from app.models.responses import ConversationMessage, ConversationResponse
+from app.models.responses import (
+    ConversationMessage,
+    ConversationResponse,
+    ConversationSummary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +26,20 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _summary(row: dict) -> ConversationSummary:
+    return ConversationSummary(
+        id=row["id"],
+        title=row.get("title"),
+        created_at=row.get("created_at"),
+        updated_at=row.get("updated_at") or row.get("created_at"),
+    )
+
+
 class ConversationStore:
     def create(self, user_id: str, title: str) -> str:
+        raise NotImplementedError
+
+    def list(self, user_id: str, limit: int = 50) -> List[ConversationSummary]:
         raise NotImplementedError
 
     def get(self, conversation_id: str, user_id: str) -> Optional[ConversationResponse]:
@@ -58,15 +74,27 @@ class MemoryConversationStore(ConversationStore):
 
     def create(self, user_id: str, title: str) -> str:
         cid = str(uuid4())
+        now = _now()
         with self._lock:
             self._conversations[cid] = {
                 "id": cid,
                 "user_id": user_id,
                 "title": title[:120],
-                "created_at": _now(),
+                "created_at": now,
+                "updated_at": now,
             }
             self._messages[cid] = []
         return cid
+
+    def list(self, user_id: str, limit: int = 50) -> List[ConversationSummary]:
+        with self._lock:
+            rows = [
+                _summary(row)
+                for row in self._conversations.values()
+                if row["user_id"] == user_id
+            ]
+        rows.sort(key=lambda s: s.updated_at or s.created_at or "", reverse=True)
+        return rows[: max(limit, 0)]
 
     def get(self, conversation_id: str, user_id: str) -> Optional[ConversationResponse]:
         with self._lock:
@@ -84,20 +112,28 @@ class MemoryConversationStore(ConversationStore):
                 )
                 for m in self._messages.get(conversation_id, [])
             ]
-        return ConversationResponse(id=row["id"], title=row.get("title"), messages=messages)
+        return ConversationResponse(
+            id=row["id"],
+            title=row.get("title"),
+            messages=messages,
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+        )
 
     def add_user_message(self, conversation_id: str, user_id: str, content: str) -> str:
         mid = str(uuid4())
+        now = _now()
         with self._lock:
             row = self._conversations.get(conversation_id)
             if row is None or row["user_id"] != user_id:
                 raise KeyError("conversation not found")
+            row["updated_at"] = now
             self._messages[conversation_id].append(
                 {
                     "id": mid,
                     "role": "user",
                     "content": content,
-                    "created_at": _now(),
+                    "created_at": now,
                 }
             )
         return mid
@@ -112,10 +148,12 @@ class MemoryConversationStore(ConversationStore):
         plan: Optional[ResearchPlan] = None,
     ) -> str:
         mid = str(uuid4())
+        now = _now()
         with self._lock:
             row = self._conversations.get(conversation_id)
             if row is None or row["user_id"] != user_id:
                 raise KeyError("conversation not found")
+            row["updated_at"] = now
             self._messages[conversation_id].append(
                 {
                     "id": mid,
@@ -123,7 +161,7 @@ class MemoryConversationStore(ConversationStore):
                     "content": content,
                     "flow": flow,
                     "plan": plan,
-                    "created_at": _now(),
+                    "created_at": now,
                 }
             )
         return mid
@@ -135,6 +173,20 @@ class SupabaseConversationStore(ConversationStore):
 
     def _client(self):
         return get_supabase_admin()
+
+    def _touch(self, conversation_id: str) -> None:
+        client = self._client()
+        if client is None:
+            return
+        try:
+            (
+                client.table(CONVERSATIONS_TABLE)
+                .update({"updated_at": _now()})
+                .eq("id", conversation_id)
+                .execute()
+            )
+        except Exception as exc:
+            logger.debug("conversation touch failed: %s", exc)
 
     def create(self, user_id: str, title: str) -> str:
         client = self._client()
@@ -151,6 +203,29 @@ class SupabaseConversationStore(ConversationStore):
             logger.warning("conversation create failed (%s) — using memory store", exc)
             return self._fallback.create(user_id, title)
 
+    def list(self, user_id: str, limit: int = 50) -> List[ConversationSummary]:
+        items: Dict[str, ConversationSummary] = {
+            item.id: item for item in self._fallback.list(user_id, limit=limit)
+        }
+        client = self._client()
+        if client is not None:
+            try:
+                result = (
+                    client.table(CONVERSATIONS_TABLE)
+                    .select("id, title, created_at, updated_at")
+                    .eq("user_id", user_id)
+                    .order("updated_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                for row in result.data or []:
+                    items[row["id"]] = _summary(row)
+            except Exception as exc:
+                logger.warning("conversation list failed: %s", exc)
+        rows = list(items.values())
+        rows.sort(key=lambda s: s.updated_at or s.created_at or "", reverse=True)
+        return rows[: max(limit, 0)]
+
     def get(self, conversation_id: str, user_id: str) -> Optional[ConversationResponse]:
         mem = self._fallback.get(conversation_id, user_id)
         if mem is not None:
@@ -161,7 +236,7 @@ class SupabaseConversationStore(ConversationStore):
         try:
             conv = (
                 client.table(CONVERSATIONS_TABLE)
-                .select("id, title, user_id")
+                .select("id, title, user_id, created_at, updated_at")
                 .eq("id", conversation_id)
                 .eq("user_id", user_id)
                 .limit(1)
@@ -190,7 +265,13 @@ class SupabaseConversationStore(ConversationStore):
                     )
                 )
             row = conv.data[0]
-            return ConversationResponse(id=row["id"], title=row.get("title"), messages=messages)
+            return ConversationResponse(
+                id=row["id"],
+                title=row.get("title"),
+                messages=messages,
+                created_at=row.get("created_at"),
+                updated_at=row.get("updated_at"),
+            )
         except Exception as exc:
             logger.warning("conversation get failed: %s", exc)
             return None
@@ -213,6 +294,7 @@ class SupabaseConversationStore(ConversationStore):
                 )
                 .execute()
             )
+            self._touch(conversation_id)
             return result.data[0]["id"]
         except Exception as exc:
             logger.warning("user message insert failed: %s", exc)
@@ -258,6 +340,7 @@ class SupabaseConversationStore(ConversationStore):
                 )
                 .execute()
             )
+            self._touch(conversation_id)
             return result.data[0]["id"]
         except Exception as exc:
             logger.warning("assistant message insert failed: %s", exc)

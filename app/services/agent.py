@@ -10,6 +10,11 @@ from openai import OpenAI
 
 from app.models.domain import AgentContext, AgentResult, ChatTurn
 from app.services.flows import classify_flow
+from app.services.known_accounts import (
+    handles_needing_platform,
+    known_accounts_from_text,
+    platform_clarifying_question,
+)
 from app.services.prompt import assemble_system_prompt, build_chat_messages
 from app.services.validator import validate_research_plan
 from app.utils.guards import sanitize_prompt
@@ -65,8 +70,14 @@ def generate_research_plan(
     if not sanitized:
         return _fail("Empty prompt after sanitisation", "empty_prompt", started=started)
 
+    known = known_accounts_from_text(sanitized, history)
+    missing_platforms = handles_needing_platform(sanitized, history, known)
     messages = build_chat_messages(
-        assemble_system_prompt(ctx),
+        assemble_system_prompt(
+            ctx,
+            known_accounts=known,
+            handles_needing_platform=missing_platforms,
+        ),
         sanitized,
         history,
     )
@@ -118,6 +129,35 @@ def generate_research_plan(
             raw=raw_text,
         )
 
+    elapsed = int((time.perf_counter() - started) * 1000)
+
+    if missing_platforms:
+        asked = parsed.get("clarifying_question")
+        if not isinstance(asked, str) or "?" not in asked:
+            asked = platform_clarifying_question(missing_platforms)
+        understood = parsed.get("understood_so_far")
+        if not isinstance(understood, str) or not understood.strip():
+            understood = (
+                "Named accounts to scrape. Niche can come from the catalog; "
+                "platform is still needed for "
+                + ", ".join(f"@{h}" for h in missing_platforms)
+                + "."
+            )
+        missing_fields = parsed.get("missing_fields")
+        if not isinstance(missing_fields, list) or "platform" not in missing_fields:
+            missing_fields = ["platform"]
+        return AgentResult(
+            ok=True,
+            plan=None,
+            clarifying_question=asked.strip(),
+            understood_so_far=understood.strip(),
+            missing_fields=missing_fields,
+            latency_ms=elapsed,
+            llm_latency_ms=llm_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
+
     valid_codes = {m.iso for m in ctx.markets}
     validation = validate_research_plan(parsed, valid_codes)
     elapsed = int((time.perf_counter() - started) * 1000)
@@ -151,6 +191,19 @@ def generate_research_plan(
         )
 
     plan = validation.plan
+    if plan is None:
+        return AgentResult(
+            ok=False,
+            plan=None,
+            validation=validation,
+            raw=raw_text,
+            error="Validation failed: plan could not be parsed",
+            error_code="validation_failed",
+            latency_ms=elapsed,
+            llm_latency_ms=llm_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+        )
     return AgentResult(
         ok=True,
         plan=plan,
