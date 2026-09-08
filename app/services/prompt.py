@@ -26,19 +26,6 @@ You do NOT execute scrapes. You do NOT access the internet. You do NOT answer qu
 
 # ── Block 2: Context Data (static parts) ─────────────────────────────
 
-REGION_MAPPINGS = """CONTEXT — REGION MAPPINGS:
-When an operator says a region name, expand it to the listed countries. Log an assumption listing which countries you included.
-
-Gulf / GCC → UAE, SA, KW
-MENA → UAE, SA, KW, EG, MA
-North Africa → EG, MA
-West Africa → NG
-East/Southern Africa → NG, ZA
-Latin America → BR, MX, CO, AR
-Southeast Asia → ID, PH, TH, MY
-South Asia → IN
-East Asia → JP"""
-
 PLATFORMS = """CONTEXT — PLATFORMS:
 Two platforms are supported: tiktok, instagram.
 Aliases: tiktok (tik tok, tt), instagram (insta, ig, reel, reels)."""
@@ -109,9 +96,9 @@ If the intent is research-related but the specific flow is unclear, default to F
 Step 2 — RESOLVE COUNTRIES
 Turn country names, nicknames, and regions into the supported market codes shown above.
 - Direct match ("Saudi Arabia" → SA): no assumption needed.
-- Nickname ("Dubai" → UAE, "KSA" → SA): no assumption needed.
-- Region ("the Gulf") → expand using region mappings. LOG AN ASSUMPTION listing every country included.
-- Unsupported country ("Qatar") → do NOT suggest, substitute, or invent another market. If they also named supported markets, plan only those and name the unsupported one in risks. If every named country is unsupported, return the empty-plan JSON (same shape as off-topic) and explain in risks that the market is not supported. Do not add recommended_runs for a stand-in country.
+- Nickname ("Dubai" -> AE, "KSA" -> SA): no assumption needed. Codes are ISO-2 exactly as listed above — never invent a variant like "UAE".
+- Region ("the Gulf", "MENA", "Southeast Asia") -> expand it yourself into every supported country it covers; see CONTEXT — REGIONS. Never ask which country. LOG AN ASSUMPTION listing every country you included.
+- Unsupported country ("Iran", "China", "Cuba") → do NOT suggest, substitute, or invent another market. If they also named supported markets, plan only those and name the unsupported one in risks. If every named country is unsupported, return the empty-plan JSON (same shape as off-topic) and explain in risks that the market is not supported. Do not add recommended_runs for a stand-in country.
 - No country mentioned (FLOW 1 or FLOW 2) → DO NOT guess. Return a clarifying_question asking which country or region they want to research.
 - FLOW 3 (reference profiles) does not require a country.
 
@@ -248,7 +235,7 @@ If the operator asked only for countries that are not on the supported markets l
   "reference_accounts": [],
   "patterns_to_watch": [],
   "content_angles": [],
-  "risks": ["Qatar is not in the supported markets list. I can only plan scrapes for listed markets — I will not suggest a substitute country."]
+  "risks": ["Iran is not in the supported markets list. I can only plan scrapes for listed markets — I will not suggest a substitute country."]
 }
 
 CLARIFYING QUESTION FORMAT:
@@ -283,23 +270,78 @@ If the question is missing platform, country, or niche, ask the operator using t
 
 
 def _build_markets_block(ctx: AgentContext) -> str:
-    rows = "\n".join(f"{m.iso} | {m.name}" for m in ctx.markets)
+    """Every plannable country, straight from apify_supported_countries.
+
+    Nothing here is hardcoded: add a row in Supabase and it appears on the
+    next context build. Languages drive hashtag localisation rather than the
+    model guessing from the country name, and "aka" names are operator
+    shorthand — only shown for rows that have any, since the model already
+    resolves the obvious nicknames on its own.
+    """
+    rows = []
+    for m in ctx.markets:
+        parts = [f"{m.iso} | {m.name}"]
+        if m.region:
+            parts.append(m.region)
+        if m.languages:
+            parts.append("/".join(m.languages))
+        if m.aliases:
+            parts.append("aka " + ", ".join(m.aliases))
+        rows.append(" | ".join(parts))
+
     return (
         "CONTEXT — SUPPORTED MARKETS:\n"
-        "You can only recommend countries from this list. Any country not listed "
-        "here is unsupported — say so in risks. Do not suggest, substitute, or "
-        f"invent another market.\n\n{rows}"
+        "Format: CODE | Name | region | languages | aka nicknames. Fields "
+        "after the name are optional and only appear where the row has them. "
+        "Anything after 'aka' is operator shorthand for that country — "
+        "resolve it to that code. Generate hashtags in the languages listed "
+        "for that market.\n"
+        "You can only recommend countries from this list. Any country not "
+        "listed here is unsupported — say so in risks. Do not suggest, "
+        f"substitute, or invent another market.\n\n" + "\n".join(rows)
     )
 
 
-def _build_aliases_block(ctx: AgentContext) -> str:
+def _build_regions_block(ctx: AgentContext) -> Optional[str]:
+    """Region expansions derived from markets.region.
+
+    Replaces a hardcoded Gulf/MENA/LATAM table. Re-file a market in Supabase
+    and the expansion follows automatically.
+    """
+    regions = ctx.regions
+    if not regions:
+        # No region overrides in the table — the model resolves regions from
+        # its own geography. It must EXPAND them, not ask which country:
+        # "Southeast Asia" hedged into a clarifying question when four of its
+        # countries were sitting in the supported list.
+        return (
+            "CONTEXT — REGIONS:\n"
+            "Operators name regions, not country lists. When they name one — "
+            "the Gulf, MENA, North Africa, West Africa, Southeast Asia, Latin "
+            "America, the Levant, the Balkans, Scandinavia, anything — expand "
+            "it YOURSELF into every supported country it covers. Never ask "
+            "which country they mean: the region IS the answer.\n"
+            "Log an assumption listing exactly which countries you included. "
+            "Drop any country in that region that is not on the supported "
+            "list, and say so in assumptions. Only if the region covers NO "
+            "supported country at all, say so in risks.\n"
+            "BEFORE YOU ANSWER: re-read your countries array and check every "
+            "code against the supported markets list above, one by one. "
+            "Delete any code that is not there. A region you know well will "
+            "contain countries this list does not cover, and those are dropped "
+            "before the plan reaches the operator — so a code you leave in "
+            "does not break anything, it just makes your assumptions wrong "
+            "about what will actually be scraped."
+        )
     rows = "\n".join(
-        f"{code} | {', '.join(aliases)}"
-        for code, aliases in ctx.country_aliases.items()
+        f"{region} -> {', '.join(codes)}" for region, codes in sorted(regions.items())
     )
     return (
-        "CONTEXT — COUNTRY ALIASES:\n"
-        f"Operators type natural language. Resolve these to the correct code.\n\n{rows}"
+        "CONTEXT — REGION MAPPINGS:\n"
+        "When an operator names a region, expand it to these countries and log "
+        "an assumption listing which ones you included. If they name a region "
+        "that is not here, map it to whichever listed markets it covers and "
+        f"say so in assumptions.\n\n{rows}"
     )
 
 
@@ -374,8 +416,7 @@ def assemble_system_prompt(
     blocks = [
         IDENTITY,
         _build_markets_block(ctx),
-        _build_aliases_block(ctx),
-        REGION_MAPPINGS,
+        _build_regions_block(ctx),
         PLATFORMS,
         PIPELINES,
         PARAMETER_LIMITS,

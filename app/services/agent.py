@@ -9,6 +9,7 @@ from typing import Optional, Sequence
 from openai import OpenAI
 
 from app.models.domain import AgentContext, AgentResult, ChatTurn
+from app.services.country_filter import filter_unsupported_countries
 from app.services.flows import classify_flow
 from app.services.known_accounts import (
     handles_needing_platform,
@@ -158,7 +159,11 @@ def generate_research_plan(
             completion_tokens=completion_tokens,
         )
 
-    valid_codes = {m.iso for m in ctx.markets}
+    valid_codes = ctx.allowed_iso_codes
+    # A region the operator names will contain countries our table does not
+    # carry. Drop those and plan the rest, rather than failing the whole
+    # request over one code nobody asked for by name.
+    parsed, _ = filter_unsupported_countries(parsed, valid_codes)
     validation = validate_research_plan(parsed, valid_codes)
     elapsed = int((time.perf_counter() - started) * 1000)
 

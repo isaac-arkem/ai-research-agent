@@ -282,9 +282,24 @@ class AgentResult(BaseModel):
 
 
 class MarketEntry(BaseModel):
+    """One row of `apify_supported_countries`.
+
+    Everything here is DB-owned. Add a country in Supabase and it appears in
+    the agent's next context build — no code change, no redeploy.
+
+    No apify_region_code field: every row in that table comes FROM the actor's
+    supported list, so the ISO code IS the geo code. No seed_hashtags either —
+    those live on `markets` and are not read here."""
+
     code: str
     iso: str
     name: str
+    region: Optional[str] = None
+    languages: List[str] = []
+    # Optional nicknames from apify_supported_countries.aliases. The model
+    # resolves the obvious ones ("Dubai", "KSA") unaided; this exists for
+    # business shorthand it could not know, and to pin anything ambiguous.
+    aliases: List[str] = []
 
 
 class TaxonomyEntry(BaseModel):
@@ -293,10 +308,33 @@ class TaxonomyEntry(BaseModel):
 
 
 class AgentContext(BaseModel):
-    """Everything the agent needs to build its prompt: the list of markets,
-    country aliases, and topic taxonomy. Assembled once at startup."""
+    """Everything the agent needs to build its prompt: plannable countries
+    and the topic taxonomy. Assembled once at startup.
+
+    No country-alias table: the model resolves "Dubai", "KSA", "Türkiye" and
+    "the Gulf" from ISO codes on its own — verified, and one less hardcoded
+    list to drift out of date."""
 
     markets: List[MarketEntry]
-    country_aliases: Dict[str, List[str]]
     taxonomy: List[TaxonomyEntry]
     db_connected: bool = False
+
+    @property
+    def allowed_iso_codes(self) -> set:
+        """Every country the agent may plan for — whatever is in `markets`."""
+        return {m.iso for m in self.markets}
+
+    @property
+    def regions(self) -> Dict[str, List[str]]:
+        """region -> ISO codes, built from markets.region.
+
+        Replaces the hardcoded region map in the prompt. Re-file a market in
+        Supabase and the expansion changes with it."""
+        grouped: Dict[str, List[str]] = {}
+        for market in self.markets:
+            if not market.region:
+                continue
+            grouped.setdefault(market.region, [])
+            if market.iso not in grouped[market.region]:
+                grouped[market.region].append(market.iso)
+        return grouped

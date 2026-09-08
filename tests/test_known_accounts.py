@@ -48,7 +48,6 @@ class _Client:
 def _ctx():
     return AgentContext(
         markets=[MarketEntry(code="SA", iso="SA", name="Saudi Arabia")],
-        country_aliases={"SA": ["KSA"]},
         taxonomy=[TaxonomyEntry(slug="fashion_beauty", aliases=["fashion"])],
     )
 

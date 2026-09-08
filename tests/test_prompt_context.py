@@ -36,7 +36,6 @@ def test_sanitize_strips_and_caps():
 def test_system_prompt_does_not_suggest_substitute_markets():
     ctx = AgentContext(
         markets=[MarketEntry(code="SA", iso="SA", name="Saudi Arabia")],
-        country_aliases={"SA": ["KSA"]},
         taxonomy=[TaxonomyEntry(slug="fashion_beauty", aliases=["fashion"])],
     )
     prompt = assemble_system_prompt(ctx)
@@ -137,7 +136,6 @@ def test_followup_branch_is_the_one_used_when_history_exists():
 def _guarded_prompt():
     ctx = AgentContext(
         markets=[MarketEntry(code="SA", iso="SA", name="Saudi Arabia")],
-        country_aliases={"SA": ["KSA"]},
         taxonomy=[TaxonomyEntry(slug="fashion_beauty", aliases=["fashion"])],
     )
     return assemble_system_prompt(ctx)

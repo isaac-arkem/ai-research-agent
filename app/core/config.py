@@ -26,16 +26,22 @@ class Settings(BaseSettings):
     # Required — the app won't start without this
     openai_api_key: str
 
-    # Supabase — optional so the app still starts for local dev without a DB.
-    # When both are set, the agent fetches markets from Supabase at startup.
-    # When missing, it falls back to the hardcoded list in app/data/markets.py.
-    # Uses the same env var names as arkgpt: NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY
+    # Supabase — the agent's country list comes from apify_supported_countries
+    # and there is no hardcoded fallback, so requests 503 without it. Still
+    # Optional[] so the process can boot and report the problem on /health
+    # rather than crashing at import.
+    # Same env var names as arkgpt: NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY
     next_public_supabase_url: Optional[str] = None
     supabase_secret_key: Optional[str] = None
 
     # Optional — same names as arkgpt so one .env works for both
     next_public_supabase_public_key: Optional[str] = None
     next_public_supabase_anon_key: Optional[str] = None
+
+    # Apify — used only to refresh the geo-targetable country list at startup.
+    # Without it the captured list in app/data/apify_countries.py is used.
+    apify_token: Optional[str] = None
+    apify_tiktok_actor: str = "clockworks~tiktok-scraper"
 
     # Optional — sensible defaults
     research_agent_model: str = "gpt-4o"
