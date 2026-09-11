@@ -38,6 +38,49 @@ class Settings(BaseSettings):
     next_public_supabase_public_key: Optional[str] = None
     next_public_supabase_anon_key: Optional[str] = None
 
+    # ── Web search ──────────────────────────────────────────────────────
+    # Tavily, and only Tavily. See app/services/search/ for why: it returns
+    # page content rather than links, so nothing downstream has to fetch and
+    # lose half its pages to bot walls. There is no provider setting — the
+    # choice is made, and a knob with one position only invites misconfiguring
+    # production. Adding a second provider later is a code change, not an
+    # env var.
+    # https://www.tavily.com — 1,000 free credits a month.
+    tavily_api_key: Optional[str] = None
+    # advanced | basic | fast | ultra-fast. advanced returns several relevant
+    # snippets per page instead of one, which is what the creator extraction
+    # reads — so it costs 2 credits a search instead of 1 and is worth it.
+    # Drop to basic to halve the cost if recall stops mattering.
+    search_depth: str = "advanced"
+
+    @property
+    def search_api_key(self) -> Optional[str]:
+        """The search provider's key. Named for the seam, not the vendor, so
+        callers do not have to care which provider is behind it."""
+        return self.tavily_api_key
+
+    search_timeout: float = 15.0
+    # Tavily's ceiling. Credits are charged per SEARCH, not per result, so
+    # asking for fewer buys nothing — and the whole job is finding creators,
+    # which more pages means more of. Relevance does fall off down the list;
+    # the extractor drops the directories and agency pages that show up there.
+    search_results_per_query: int = 20
+    # Recency filter for the by-hand script only: d day, w week, m month,
+    # y year, or empty for none. The agent does not read this — the window
+    # comes from what the operator asked for, or is left off entirely.
+    search_window: str = ""
+
+    # ── Web grounding ───────────────────────────────────────────────────
+    # Search the web before planning, so hashtags and creators come from this
+    # week rather than the model's training data. See app/services/grounding.py.
+    # Off switch, not a rewrite: with this false the planner behaves exactly as
+    # it did before grounding existed.
+    search_grounding_enabled: bool = True
+    # Frames the search query and decides whether to search at all. A small
+    # model is the right tool — it writes one line of JSON, and it runs on
+    # every ask, so gpt-4o's price for it would be paid on every request.
+    grounding_model: str = "gpt-4o-mini"
+
     # Apify — used only to refresh the geo-targetable country list at startup.
     # Without it the captured list in app/data/apify_countries.py is used.
     apify_token: Optional[str] = None

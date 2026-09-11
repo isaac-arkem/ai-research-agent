@@ -4,7 +4,12 @@ import json
 import logging
 from typing import Dict, Optional
 
+import asyncio
+import queue
+import threading
+
 from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.responses import StreamingResponse
 
 from app.core.auth import AuthUser, get_current_user
 from app.core.config import Settings, get_settings
@@ -21,6 +26,7 @@ from app.models.responses import (
 )
 from app.services import conversations as conversation_service
 from app.services.agent import generate_research_plan
+from app.services.grounding import render_findings_message
 from app.services.audit import write_audit
 
 logger = logging.getLogger(__name__)
@@ -90,14 +96,30 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
             return None
     if result.ok and result.clarifying_question:
         try:
-            cq_json = json.dumps(
-                {
-                    "clarifying_question": result.clarifying_question,
-                    "understood_so_far": result.understood_so_far,
-                    "missing_fields": result.missing_fields or [],
-                },
-                ensure_ascii=False,
-            )
+            stored = {
+                "clarifying_question": result.clarifying_question,
+                "understood_so_far": result.understood_so_far,
+                "missing_fields": result.missing_fields or [],
+            }
+            if result.findings:
+                # The fenced copy, stored but never displayed. This is how the
+                # sources reach the next turn: history hands this message back
+                # to triage and to the planner, so the approval turn can plan
+                # from what the operator actually approved.
+                stored["web_results"] = render_findings_message(
+                    result.findings,
+                    result.searched_for or "",
+                    creators=result.creators,
+                    hashtags=result.hashtags,
+                )
+                # The same sources structurally, for the console to render as
+                # cards when a thread is reopened. The fenced copy above is
+                # for the planner; this one is for the operator.
+                stored["findings"] = [f.model_dump() for f in result.findings]
+                stored["creators"] = [c.model_dump() for c in (result.creators or [])]
+                stored["hashtags"] = [h.model_dump() for h in (result.hashtags or [])]
+                stored["searched_for"] = result.searched_for
+            cq_json = json.dumps(stored, ensure_ascii=False)
             return conversation_service.store.add_assistant_message(
                 cid,
                 user_id,
@@ -124,6 +146,7 @@ def _run_model(
         temperature=settings.llm_temperature,
         max_tokens=settings.llm_max_tokens,
         history=history,
+        settings=settings,
     )
     return model, result
 
@@ -142,6 +165,11 @@ def _success_body(result: AgentResult, cid: str, message_id: Optional[str]) -> A
         completion_tokens=result.completion_tokens,
         conversation_id=cid,
         message_id=message_id,
+        findings=result.findings,
+        creators=result.creators,
+        hashtags=result.hashtags,
+        searched_for=result.searched_for,
+        awaiting_approval=result.awaiting_approval,
     )
 
 
@@ -203,6 +231,116 @@ def ask(
         )
     return _success_body(result, cid, message_id)
 
+
+
+# ── streaming ────────────────────────────────────────────────────────
+#
+# A review turn does three slow things in a row — triage, a 20-result
+# advanced search, then reading every page — and the console had nothing to
+# show for any of it. Same pipeline, same result; it just says what it is
+# doing while it does it.
+#
+# Not token streaming: every model call here asks for a JSON object, so
+# streaming the tokens would spell out `{"crea` `tors":` to nobody's benefit.
+# The stages are the part a person wants to see.
+
+STREAM_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    # Nginx buffers text/event-stream by default, which holds every event
+    # until the response ends — exactly the silence this is here to fix.
+    "X-Accel-Buffering": "no",
+}
+
+# The queue is unbounded but the producer is one turn of one request, so it
+# holds a handful of events at most.
+_DONE = object()
+
+
+def _sse(event: str, payload: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.post("/ask/stream", include_in_schema=True)
+async def ask_stream(
+    req: AskRequest,
+    request: Request,
+    user: AuthUser = Depends(enforce_rate_limit),
+    ctx: AgentContext = Depends(get_agent_context),
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    """The same turn as POST /ask, narrated as it happens.
+
+    The pipeline is synchronous — the OpenAI and Tavily clients both block —
+    so it runs on a worker thread and posts its stages to a queue that this
+    generator drains. The final event carries exactly the body /ask would
+    have returned, so a client can ignore the rest and still be correct.
+    """
+
+    cid, history = _history_for_request(req, user.id)
+    _persist_user_message(cid, user.id, req.prompt)
+
+    events: "queue.Queue" = queue.Queue()
+
+    def on_progress(stage: str, **fields) -> None:
+        events.put(("progress", {"stage": stage, **fields}))
+
+    def run() -> None:
+        try:
+            model = req.model or settings.research_agent_model
+            result = generate_research_plan(
+                req.prompt,
+                ctx,
+                openai_key=settings.openai_api_key,
+                model=model,
+                temperature=settings.llm_temperature,
+                max_tokens=settings.llm_max_tokens,
+                history=history,
+                settings=settings,
+                on_progress=on_progress,
+            )
+            message_id = _persist_assistant(cid, user.id, result)
+            status = 200 if result.ok else ERROR_HTTP.get(result.error_code or "", 500)
+            write_audit(
+                user_id=user.id, prompt=req.prompt, model=model, result=result,
+                status_code=status, conversation_id=cid, message_id=message_id,
+            )
+            if result.ok:
+                body = _success_body(result, cid, message_id).model_dump(
+                    exclude_none=True
+                )
+                events.put(("done", body))
+            else:
+                events.put(("failed", _error_payload(result, cid)))
+        except Exception as exc:  # noqa: BLE001 - the stream must always close
+            logger.exception("streamed ask failed")
+            events.put(("failed", error_body(
+                str(exc) or "Request failed", "planner_failed", conversation_id=cid,
+            )))
+        finally:
+            events.put((_DONE, None))
+
+    threading.Thread(target=run, daemon=True).start()
+
+    async def stream():
+        # Sent immediately so the console can swap its spinner for a status
+        # line before the first slow call has even started.
+        yield _sse("progress", {"stage": "started", "conversation_id": cid,
+                                "detail": "Working on it"})
+        loop = asyncio.get_running_loop()
+        while True:
+            kind, payload = await loop.run_in_executor(None, events.get)
+            if kind is _DONE:
+                break
+            if await request.is_disconnected():
+                # Nobody is listening. The worker finishes and persists
+                # anyway, so the turn is not lost from the conversation.
+                break
+            yield _sse(kind, payload)
+
+    return StreamingResponse(
+        stream(), media_type="text/event-stream", headers=STREAM_HEADERS
+    )
 
 @router.get(
     "/conversations",

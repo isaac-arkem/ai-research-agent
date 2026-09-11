@@ -171,3 +171,25 @@ def test_edit_target_skips_empty_offtopic_replies():
     text = build_user_message("change the niche", is_followup=True)
     assert "actually has runs or" in text
     assert "skip past any empty off-topic replies" in text
+
+
+def test_the_prompt_says_what_assumptions_are_for():
+    """It used to say only "each inference you made", and the model filled it
+    with a readback of the request — "The operator wants to scrape the TikTok
+    account of @isaac" — which tells the operator nothing they could disagree
+    with. The point of the field is catching a decision before it runs."""
+    from app.models.domain import AgentContext, MarketEntry
+    from app.services.prompt import assemble_system_prompt
+
+    prompt = assemble_system_prompt(
+        AgentContext(markets=[MarketEntry(code="NG", iso="NG", name="Nigeria")],
+                     taxonomy=[])
+    )
+    assert "ASSUMPTIONS:" in prompt
+    # what it is for
+    assert "catch a decision they disagree with" in prompt
+    # and the shape of a wrong one, named explicitly
+    assert "Never restate the request" in prompt
+    assert "The operator wants to scrape the TikTok account of @isaac" in prompt
+    # an empty array is a valid answer, not a gap to pad
+    assert "return an empty array" in prompt
