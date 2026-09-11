@@ -9,7 +9,7 @@
 #   1. Country codes must be from our 19 supported markets
 #   2. Pipeline field must match the array it's in
 #   3. max_creators must be one of [5, 10, 20, 50, 100, 200]
-#   4. posts_per_source must be 1–200; recency_days must be positive or null
+#   4. posts_per_source must be 1–100; recency_days must be positive or null
 #   5. platforms must be "tiktok" and/or "instagram"
 #   6. niche must be a lowercase_underscore slug
 #   7. hashtags must not be empty
@@ -116,8 +116,8 @@ def validate_research_plan(
 
         # Rule 4: posts_per_source
         pps = run.get("posts_per_source")
-        if not isinstance(pps, int) or pps < 1 or pps > 200:
-            errors.append(ValidationError_(rule=4, field=f"{prefix}.posts_per_source", message=f"posts_per_source must be an integer 1–200, got {pps}"))
+        if not isinstance(pps, int) or pps < 1 or pps > 100:
+            errors.append(ValidationError_(rule=4, field=f"{prefix}.posts_per_source", message=f"posts_per_source must be an integer 1–100, got {pps}"))
 
         # Rule 5: platforms
         platforms = run.get("platforms", [])
@@ -231,8 +231,8 @@ def validate_research_plan(
         # Rule 4: posts_per_source (optional, default 10)
         pps = ref.get("posts_per_source")
         if pps is not None:
-            if not isinstance(pps, int) or pps < 1 or pps > 200:
-                errors.append(ValidationError_(rule=4, field=f"{prefix}.posts_per_source", message=f"posts_per_source must be an integer 1–200, got {pps}"))
+            if not isinstance(pps, int) or pps < 1 or pps > 100:
+                errors.append(ValidationError_(rule=4, field=f"{prefix}.posts_per_source", message=f"posts_per_source must be an integer 1–100, got {pps}"))
 
         # Rule 4: recency_days (optional)
         recency = ref.get("recency_days")

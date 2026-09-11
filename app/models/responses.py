@@ -4,7 +4,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .domain import FlowName, ResearchPlan
+from .domain import Creator, FlowName, Hashtag, ResearchPlan, WebFinding
 
 _ASK_SUCCESS_EXAMPLE = {
     "ok": True,
@@ -57,6 +57,13 @@ class AskResponse(BaseModel):
     completion_tokens: Optional[int] = None
     conversation_id: Optional[str] = None
     message_id: Optional[str] = None
+    # A review turn returns sources and no plan: the operator approves or
+    # narrows them, and the plan is drawn on the turn after.
+    findings: Optional[List[WebFinding]] = None
+    creators: Optional[List[Creator]] = None
+    hashtags: Optional[List[Hashtag]] = None
+    searched_for: Optional[str] = None
+    awaiting_approval: Optional[bool] = None
 
 
 class ErrorResponse(BaseModel):

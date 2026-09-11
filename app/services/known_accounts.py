@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence
@@ -193,6 +194,86 @@ def _user_texts(prompt: str, history: Optional[Iterable] = None) -> List[str]:
 def operator_named_platform(*texts: str) -> bool:
     """True when the operator already said TikTok or Instagram."""
     return any(PLATFORM_WORD_RE.search(text or "") for text in texts)
+
+
+def _role_of(turn) -> Optional[str]:
+    return getattr(turn, "role", None) or (
+        turn.get("role") if isinstance(turn, dict) else None
+    )
+
+
+def _content_of(turn) -> str:
+    content = getattr(turn, "content", None) or (
+        turn.get("content") if isinstance(turn, dict) else None
+    )
+    return str(content or "")
+
+
+def _pending_question(turn) -> bool:
+    """Was this assistant turn a question still waiting on an answer?
+
+    A review turn also carries a "clarifying_question", so the word decides
+    nothing. What separates them is missing_fields: a question names what it
+    still needs, a review turn names nothing.
+    """
+    content = _content_of(turn)
+    if "clarifying_question" not in content:
+        return False
+    try:
+        missing = json.loads(content).get("missing_fields")
+    except ValueError:
+        return False
+    return isinstance(missing, list) and len(missing) > 0
+
+
+def continues_named_account_job(
+    prompt: str, history: Optional[Iterable] = None
+) -> bool:
+    """Is this turn answering a question about accounts already named?
+
+    "instagram" names nothing on its own, but as the answer to "which
+    platform is 'isaac' on?" it belongs to a job whose plan IS that account.
+
+    A request can take several questions to settle — platform, then niche —
+    so this walks back through the run of questions and answers, not just the
+    last one. The walk STOPS at the first assistant turn that is not a
+    question still waiting on a field: a plan or a review turn closes a
+    request, and what was named before it belongs to a finished job.
+
+    That stopping rule is the whole safety of it. Without a way to tell a
+    pending question from a review turn, an earlier version walked back
+    through everything and silenced research for the rest of the
+    conversation.
+    """
+
+    turns = list(history or [])
+    if not turns or _role_of(turns[-1]) != "assistant":
+        return False
+
+    for turn in reversed(turns):
+        if _role_of(turn) == "assistant":
+            if not _pending_question(turn):
+                return False      # the chain ends here
+            continue
+        if _role_of(turn) == "user" and extract_handles(_content_of(turn)):
+            return True
+    return False
+
+
+def names_accounts(prompt: str) -> bool:
+    """Does THIS message name accounts to scrape?
+
+    Deliberately only this message. An earlier version walked back through
+    the conversation trying to work out whether a bare answer like
+    "tech-giants" belonged to a named-account job, and got it wrong twice —
+    first by treating any handle in the thread as permanent, then by cutting
+    the chain in the wrong place. That judgment needs to read intent, which
+    is what the router model is for; this is the part that does not.
+
+    So: an unambiguous, free check for the unambiguous case. Everything that
+    depends on context is decided by triage, which has the history.
+    """
+    return bool(extract_handles(prompt))
 
 
 def handles_needing_platform(

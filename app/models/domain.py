@@ -29,7 +29,7 @@ class RecommendedRun(BaseModel):
     hashtags: List[str] = Field(min_length=3)
     niche: str
     max_creators: Literal[5, 10, 20, 50, 100, 200]
-    posts_per_source: int = Field(ge=1, le=200)
+    posts_per_source: int = Field(ge=1, le=100)
     recency_days: Optional[int] = None
     title: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
@@ -61,7 +61,7 @@ class ReferenceAccount(BaseModel):
     handles: List[str] = Field(min_length=1)
     platforms: List[Literal["tiktok", "instagram"]] = Field(min_length=1)
     niche: str
-    posts_per_source: int = Field(default=10, ge=1, le=200)
+    posts_per_source: int = Field(default=10, ge=1, le=100)
     recency_days: Optional[int] = None
     title: Optional[str] = None
     rationale: str = Field(min_length=1)
@@ -246,6 +246,55 @@ class ChatTurn(BaseModel):
     content: str
 
 
+class WebFinding(BaseModel):
+    """One web result, as the operator sees it and as the planner reads it.
+
+    Lives in domain rather than in the grounding module because it crosses the
+    API boundary: the review turn hands these back so the operator can judge
+    the sources before a plan is drawn on top of them.
+    """
+
+    title: str
+    url: str
+    snippet: str = ""
+    content: Optional[str] = None
+
+
+class Hashtag(BaseModel):
+    """A hashtag seen in the search results.
+
+    `sources` is how many of the pages used it — a weak but real signal of
+    which tags a market actually uses, as against one blogger's invention.
+    """
+
+    tag: str
+    sources: int = 1
+
+
+class Creator(BaseModel):
+    """A creator lifted out of a search result's page text.
+
+    The operator asked for creators, not links, and the page text Tavily
+    returns already names them. `handle` is None when the text names someone
+    without giving an account — still worth showing, since the operator may
+    recognise the name even when we cannot scrape it yet.
+    """
+
+    name: str
+    handle: Optional[str] = None
+    platform: Optional[str] = None
+    why: str = ""
+    # 1-based index into the findings this came from, so the claim can be
+    # traced back to the page that made it.
+    source: Optional[int] = None
+    # The page that named them. Resolved from `source` in code — never asked
+    # of the model, which would invent one.
+    source_url: Optional[str] = None
+    # Where to look at the account itself before scraping it. Built from
+    # handle + platform, so it only exists when the page gave us both.
+    profile_url: Optional[str] = None
+
+
 class AgentResult(BaseModel):
     """The final package returned to whoever called the agent.
 
@@ -267,6 +316,13 @@ class AgentResult(BaseModel):
     llm_latency_ms: Optional[int] = None
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
+    # Set on a review turn: what the search found, for the operator to approve
+    # or narrow before planning. Absent on every other kind of turn.
+    findings: Optional[List[WebFinding]] = None
+    creators: Optional[List[Creator]] = None
+    hashtags: Optional[List[Hashtag]] = None
+    searched_for: Optional[str] = None
+    awaiting_approval: Optional[bool] = None
 
     class Config:
         # Drop None fields from the JSON response so successful responses
