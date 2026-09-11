@@ -29,7 +29,12 @@ class RecommendedRun(BaseModel):
     hashtags: List[str] = Field(min_length=3)
     niche: str
     max_creators: Literal[5, 10, 20, 50, 100, 200]
-    posts_per_source: int = Field(ge=1, le=100)
+    # 100 is the limit for a NEW plan, enforced by clamp.py and validator.py.
+    # This bound is looser on purpose: the same model parses plans read back
+    # out of the conversation store, and a plan written when the limit was
+    # 200 was valid then. Tightening it here would make old threads fail to
+    # open, which is a strange way to enforce a rule about new ones.
+    posts_per_source: int = Field(ge=1, le=200)
     recency_days: Optional[int] = None
     title: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
@@ -61,7 +66,8 @@ class ReferenceAccount(BaseModel):
     handles: List[str] = Field(min_length=1)
     platforms: List[Literal["tiktok", "instagram"]] = Field(min_length=1)
     niche: str
-    posts_per_source: int = Field(default=10, ge=1, le=100)
+    # Looser than the 100 limit for the same reason as RecommendedRun above.
+    posts_per_source: int = Field(default=10, ge=1, le=200)
     recency_days: Optional[int] = None
     title: Optional[str] = None
     rationale: str = Field(min_length=1)

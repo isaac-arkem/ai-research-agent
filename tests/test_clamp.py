@@ -111,18 +111,33 @@ def test_a_plan_with_no_jobs_is_handled():
     assert notes == []
 
 
-def test_the_posts_ceiling_matches_everywhere_it_is_stated():
-    """It is written in four places — the clamp, the validator, the pydantic
-    model and the prompt. One of them disagreeing means a plan that clamps
+def test_the_posts_limit_agrees_where_it_is_enforced():
+    """The clamp and the prompt must state the same number, or a plan clamps
     cleanly and then fails validation anyway."""
     import re
 
-    from app.models.domain import RecommendedRun
     from app.services.prompt import PARAMETER_LIMITS
+
+    stated = re.search(r"posts_per_source: integer between 1 and (\d+)", PARAMETER_LIMITS)
+    assert stated and int(stated.group(1)) == POSTS_MAX == 100
+
+
+def test_the_stored_model_is_deliberately_looser_than_the_limit():
+    """It parses history as well as new plans. A plan written when the limit
+    was 200 was valid then, and tightening this bound only made old threads
+    fail to open — it enforces nothing, because clamp.py and validator.py
+    already stop a new plan going over."""
+    from app.models.domain import RecommendedRun
 
     field = RecommendedRun.model_fields["posts_per_source"]
     ceiling = next(m.le for m in field.metadata if hasattr(m, "le"))
-    assert ceiling == POSTS_MAX
+    assert ceiling > POSTS_MAX
 
-    stated = re.search(r"posts_per_source: integer between 1 and (\d+)", PARAMETER_LIMITS)
-    assert stated and int(stated.group(1)) == POSTS_MAX
+    # an old plan still loads
+    from tests.plans import discovery_plan
+
+    stored = discovery_plan().model_dump()
+    stored["recommended_runs"][0]["posts_per_source"] = 200   # legal when written
+    from app.models.domain import ResearchPlan
+
+    ResearchPlan.model_validate(stored)
