@@ -2151,3 +2151,41 @@ def test_a_follow_up_still_reaches_the_web_lane_standalone():
 
     assert '"topic" IS WHAT TO SEARCH FOR, AND IT MUST STAND ALONE' in TRIAGE_SYSTEM
     assert "merge what came before with what they just said" in TRIAGE_SYSTEM
+
+
+def test_a_question_about_one_person_is_answered_with_that_person():
+    """"what are his handles?" came back with 37 creators: fan pages, blogs and
+    update accounts that had posted under #sarkodie, with his own two handles
+    last because post authors lead the merge. The question named one person,
+    so one person is the answer."""
+    from app.models.domain import Creator
+    from app.services.grounding import _only_the_subject
+
+    found = [
+        Creator(name="Sarkodie Ba Chosen\u00b9.e", handle="de.chosen.one41",
+                platform="tiktok", why="fan page"),
+        Creator(name="Sark Updates Tv", handle="sarkupdatestv",
+                platform="tiktok", why="update account"),
+        Creator(name="STARGYAL", handle="afronitaaa", platform="tiktok", why="posted"),
+        Creator(name="Sarkodie", handle="sarkodie.official", platform="tiktok", why="his"),
+        Creator(name="Sarkodie", handle="sarkodie", platform="instagram", why="his"),
+    ]
+    kept = _only_the_subject(found, "Sarkodie")
+    assert [c.handle for c in kept] == ["sarkodie.official", "sarkodie"]
+
+    # A name that merely CONTAINS the subject is a different person.
+    assert all("chosen" not in c.handle for c in kept)
+
+    # No subject means a list question, and a list question keeps its list.
+    assert _only_the_subject(found, None) == found
+
+    # A subject nothing matches falls back rather than emptying the answer.
+    assert _only_the_subject(found, "Stonebwoy") == found
+
+
+def test_the_router_is_told_when_to_set_a_subject():
+    from app.services.grounding import TRIAGE_SYSTEM
+
+    assert '"subject" IS THE ONE PERSON THE QUESTION IS ABOUT' in TRIAGE_SYSTEM
+    assert "null almost always" in TRIAGE_SYSTEM
+    assert "AN ACCOUNT IS AN @HANDLE OR A PROFILE URL" in TRIAGE_SYSTEM
