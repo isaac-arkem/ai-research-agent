@@ -509,6 +509,7 @@ def run_research(
     resolved_handles: Optional[set] = None,
     answer: Optional[str] = None,
     force_lanes: Optional[List[str]] = None,
+    subject: Optional[str] = None,
     max_workers: int = 6,
     **lane_options: Any,
 ) -> ResearchResult:
@@ -541,6 +542,23 @@ def run_research(
         for source in list(subquery.sources) + [
             p for p in named if p not in subquery.sources
         ]:
+            # A question about ONE named person is not a hashtag sweep. The
+            # paid lanes search a tag and return whoever posted under it,
+            # which for "what are Sarkodie's handles" is fan pages, blogs and
+            # update accounts — 35 of them, none of them him. His own handles
+            # come off the web lane, which reads his profile pages.
+            #
+            # So the lane is not run and then filtered, it is not run. The
+            # filtering came first and was the wrong half of the fix: it made
+            # the answer clean while still paying Apify for every account it
+            # threw away.
+            if subject and source in PAID_LANES:
+                outcomes.append(LaneOutcome(
+                    source, "skipped", 0,
+                    f"not scraped — the question is about {subject}, "
+                    "and a hashtag sweep returns whoever posted under the tag",
+                ))
+                continue
             if not paid_lane_allowed(source, named):
                 # Declined before it costs anything, and recorded so the brief
                 # can say the lane was never asked rather than found nothing.

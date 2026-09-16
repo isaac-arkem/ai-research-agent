@@ -1844,6 +1844,9 @@ def _research_via_engine(
             # Instagram and TikTok; not querying those is answering a
             # different question.
             force_lanes=platforms_named(query.text) or platforms_named(prompt),
+            # One named person: the web lane reads their profile pages, and
+            # the scrape lanes would only sweep a hashtag full of other people.
+            subject=subject,
             **targets,
         )
         search_ms = int((time.perf_counter() - started) * 1000)
