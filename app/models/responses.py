@@ -4,7 +4,14 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .domain import Creator, FlowName, Hashtag, ResearchPlan, WebFinding
+from .domain import (
+    Creator,
+    FlowName,
+    Hashtag,
+    MarketFinding,
+    ResearchPlan,
+    WebFinding,
+)
 
 _ASK_SUCCESS_EXAMPLE = {
     "ok": True,
@@ -62,6 +69,10 @@ class AskResponse(BaseModel):
     findings: Optional[List[WebFinding]] = None
     creators: Optional[List[Creator]] = None
     hashtags: Optional[List[Hashtag]] = None
+    # The countries a "which market" question resolved to. Without this on the
+    # response the console has nothing to render and falls back to showing
+    # only source cards — which reads as "go read them yourself".
+    markets: Optional[List[MarketFinding]] = None
     searched_for: Optional[str] = None
     awaiting_approval: Optional[bool] = None
 

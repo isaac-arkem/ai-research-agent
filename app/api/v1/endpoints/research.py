@@ -111,6 +111,7 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
                     result.searched_for or "",
                     creators=result.creators,
                     hashtags=result.hashtags,
+                    markets=result.markets,
                 )
                 # The same sources structurally, for the console to render as
                 # cards when a thread is reopened. The fenced copy above is
@@ -118,6 +119,7 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
                 stored["findings"] = [f.model_dump() for f in result.findings]
                 stored["creators"] = [c.model_dump() for c in (result.creators or [])]
                 stored["hashtags"] = [h.model_dump() for h in (result.hashtags or [])]
+                stored["markets"] = [m.model_dump() for m in (result.markets or [])]
                 stored["searched_for"] = result.searched_for
             cq_json = json.dumps(stored, ensure_ascii=False)
             return conversation_service.store.add_assistant_message(
@@ -168,6 +170,7 @@ def _success_body(result: AgentResult, cid: str, message_id: Optional[str]) -> A
         findings=result.findings,
         creators=result.creators,
         hashtags=result.hashtags,
+        markets=result.markets,
         searched_for=result.searched_for,
         awaiting_approval=result.awaiting_approval,
     )
