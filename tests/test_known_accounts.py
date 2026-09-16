@@ -4,6 +4,7 @@ from app.services.known_accounts import (
     extract_handles,
     handles_needing_platform,
     lookup_known_accounts,
+    names_accounts,
     platform_clarifying_question,
     shared_job_niche,
 )
@@ -59,6 +60,27 @@ def test_extracts_at_handles_and_scrape_names():
         "Scrape the accounts @ayo_arm_media and @ernest for content related to heritage"
     ) == ["ayo_arm_media", "ernest"]
     assert extract_handles("Find modest fashion in SA") == []
+
+
+def test_asking_to_find_handles_names_no_accounts():
+    """A request to FIND someone's accounts must not be read as naming them.
+
+    "scrape sarkodie's specific profiles so find his handles" used to return
+    ['specific', 'so', 'find', 'his'] — the walk skipped tokens it could not
+    parse and kept collecting. Four English words became accounts, which
+    bypasses research, and the conversation then asked for the handles it had
+    just been asked to find, once per turn, forever.
+    """
+    assert extract_handles(
+        "yes I am looking to scrape sarkodie's specific profiles so find his handles"
+    ) == []
+    assert extract_handles("scrape the profiles of popular ghanaian musicians") == []
+    assert extract_handles("scrape profiles for me please") == []
+    assert not names_accounts("can you get me the instagram handles of sarkodie?")
+    assert not names_accounts("i want you to get me the handle of sarkodie")
+    # ...while an actual list of names is still a named-account job
+    assert names_accounts("scrape isaac and dave")
+    assert names_accounts("scrape @cookingwithnada")
 
 
 def test_lookup_returns_platform_and_niche():
