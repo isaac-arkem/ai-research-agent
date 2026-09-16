@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import re
-import sys
 from typing import Any
 
 from . import env, http, schema
+
+logger = logging.getLogger(__name__)
 
 GEMINI_FLASH_LITE = "gemini-3.1-flash-lite"
 GEMINI_PRO = "gemini-3.1-pro-preview"
@@ -382,7 +385,10 @@ def extract_gemini_text(payload: dict[str, Any]) -> str:
             if text:
                 return text
     if payload:
-        print(f"[Providers] extract_gemini_text: no text in payload keys: {list(payload.keys())}", file=sys.stderr)
+        logger.warning(
+            "providers: extract_gemini_text found no text in payload keys: %s",
+            list(payload.keys()),
+        )
     return ""
 
 
@@ -407,5 +413,8 @@ def extract_openai_text(payload: dict[str, Any]) -> str:
             if isinstance(message, dict) and isinstance(message.get("content"), str):
                 return message["content"]
     if payload:
-        print(f"[Providers] extract_openai_text: no text in payload keys: {list(payload.keys())}", file=sys.stderr)
+        logger.warning(
+            "providers: extract_openai_text found no text in payload keys: %s",
+            list(payload.keys()),
+        )
     return ""

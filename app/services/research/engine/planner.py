@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 import re
 import unicodedata
 from collections import Counter
 
 from . import categories, competitors, entity_extract, http, log, providers, query, relevance, schema
+
+logger = logging.getLogger(__name__)
 
 # Hebrew Unicode block: U+0590–U+05FF
 _HEBREW_RE = re.compile(r'[\u0590-\u05FF]')
@@ -380,8 +384,10 @@ def plan_query(
             if plan.subqueries:
                 return plan
         except (ValueError, KeyError, json.JSONDecodeError, OSError, http.HTTPError) as exc:
-            import sys
-            print(f"[Planner] LLM planning failed, using deterministic fallback: {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning(
+                "planner: LLM planning failed, using deterministic fallback: %s: %s",
+                type(exc).__name__, exc,
+            )
             return _fallback_plan(
                 topic, available_sources, requested_sources, depth,
                 note=f"fallback-plan (LLM error: {type(exc).__name__})",
@@ -396,15 +402,13 @@ def plan_query(
     # the hosting reasoning model, YOU are the provider. LAW 7 / 2026-04-19
     # Hermes Agent Use Cases failure mode.
     if not internal_subrun:
-        import sys
-        print(
-            "[Planner] No --plan passed. If you are the reasoning model hosting "
-            "this skill (Claude Code, Codex, Hermes, Gemini, or any agent runtime), "
-            "YOU ARE the planner: generate a JSON query plan yourself and pass it "
-            "via --plan. You do not need an API key or credentials; you ARE the "
-            "LLM. The deterministic fallback below is the headless/cron path only. "
-            "See LAW 7 in SKILL.md and Step 0.75 for the plan schema.",
-            file=sys.stderr,
+        # Upstream printed a page of CLI instructions here, addressed to a
+        # reasoning model running this as a standalone skill: pass --plan, see
+        # SKILL.md. Neither exists in this service, which always supplies a
+        # provider, so that text was misleading on the one path where it fired.
+        logger.info(
+            "planner: no plan and no provider supplied — using the deterministic "
+            "fallback, which writes weaker subqueries than the model planner"
         )
     return _fallback_plan(topic, available_sources, requested_sources, depth)
 

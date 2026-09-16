@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 import math
 import re
 from datetime import datetime
 
 from . import http, providers, relevance, schema, signals
+
+logger = logging.getLogger(__name__)
 
 
 # Penalty applied when a candidate does not mention the primary entity
@@ -285,8 +289,10 @@ def rerank_candidates(
             )
             _apply_llm_scores(shortlisted, response, resolved_handles=handles)
         except (ValueError, KeyError, json.JSONDecodeError, OSError, http.HTTPError) as exc:
-            import sys
-            print(f"[Rerank] LLM reranking failed, using local fallback: {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning(
+                "rerank: LLM reranking failed, using the local fallback: %s: %s",
+                type(exc).__name__, exc,
+            )
             _apply_fallback_scores(shortlisted, primary_entity=primary_entity, resolved_handles=handles)
     else:
         _apply_fallback_scores(shortlisted, primary_entity=primary_entity, resolved_handles=handles)
@@ -846,8 +852,10 @@ def score_fun(
             response = provider.generate_json(model, _build_fun_prompt(topic, pool))
             _apply_fun_scores(pool, response)
         except (ValueError, KeyError, json.JSONDecodeError, OSError, http.HTTPError) as exc:
-            import sys
-            print(f"[FunJudge] LLM scoring failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            logger.warning(
+                "rerank: LLM scoring failed, using the local fallback: %s: %s",
+                type(exc).__name__, exc,
+            )
             _apply_fun_fallback(pool)
     else:
         _apply_fun_fallback(pool)
