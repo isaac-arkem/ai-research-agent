@@ -80,6 +80,51 @@ class Settings(BaseSettings):
     # model is the right tool — it writes one line of JSON, and it runs on
     # every ask, so gpt-4o's price for it would be paid on every request.
     grounding_model: str = "gpt-4o-mini"
+    # Re-asked on ONE routing call the small model gets wrong: a skip that
+    # blames named accounts on a message carrying no "@". Measured side by
+    # side, gpt-4o routes "give me sarkodie and stonebwoy handles" to a search
+    # and gpt-4o-mini routes it to skip — a capability difference, not a
+    # wording one, which is why rewriting the instruction did not fix it.
+    # Set to "" to turn escalation off and take the small model's answer.
+    grounding_escalation_model: str = "gpt-4o"
+
+    # ── Multi-source research engine ────────────────────────────────────
+    # With this on, a search fans out across Reddit, Hacker News, Instagram,
+    # TikTok and Polymarket as well as the web, and the engine decides which
+    # of them the question actually needs. Off, grounding calls the web
+    # provider directly exactly as it did before — the same off-switch shape
+    # as search_grounding_enabled, for the same reason: a bad day for the
+    # engine must not become a bad day for the planner.
+    research_engine_enabled: bool = True
+    # Writes the query plan and resolves hashtags. NOT the grounding model:
+    # gpt-4o-mini was measured emitting plans whose source_weights and
+    # per-subquery sources contradicted each other, which routes a run to the
+    # wrong lanes. This runs once per search rather than once per turn, so the
+    # better model is affordable here.
+    research_plan_model: str = "gpt-4o"
+    # How far back a research run looks. Wide by default: a creator-landscape
+    # question is not a news question, and a two-year-old "top creators" page
+    # is often the best evidence there is. The reranker prefers recent items
+    # on its own, so this does not have to.
+    research_window_days: int = 365
+    # quick | default | deep.
+    #
+    # NOT just a result-count knob. planner._sanitize_plan hard-truncates a
+    # "quick" plan to ONE subquery:
+    #
+    #     if depth == "quick" and subqueries:
+    #         subqueries = subqueries[:1]
+    #
+    # So quick cannot cover two platforms, two regions, or two angles — it
+    # asks one question and reports whatever that one question found. It is
+    # why a "which country" run only ever looked at Africa, and why a creator
+    # question with no platform named came back all-TikTok: the Instagram
+    # subquery was written and then dropped.
+    #
+    # "default" costs more — more subqueries, and DEPTH_LIMITS doubles
+    # per-lane results from 10 to 20, which on the Apify lanes is real money.
+    # Breadth is the thing that was wrong, so it is worth paying for.
+    research_depth: str = "default"
 
     # Apify — used only to refresh the geo-targetable country list at startup.
     # Without it the captured list in app/data/apify_countries.py is used.

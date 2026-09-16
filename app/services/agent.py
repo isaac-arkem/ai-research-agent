@@ -13,7 +13,7 @@ from app.services.clamp import clamp_parameters
 from app.services.country_filter import filter_unsupported_countries
 from app.services.flows import classify_flow
 from app.services.grounding import (
-    REVIEW_QUESTION,
+    review_question_for,
     gather_web_context,
     summarise_findings,
 )
@@ -171,12 +171,13 @@ def generate_research_plan(
             return AgentResult(
                 ok=True,
                 plan=None,
-                clarifying_question=REVIEW_QUESTION,
+                clarifying_question=review_question_for(web),
                 understood_so_far=summarise_findings(web),
                 missing_fields=[],
                 findings=web.findings,
                 creators=web.creators,
                 hashtags=web.hashtags,
+                markets=web.markets,
                 searched_for=web.query,
                 awaiting_approval=True,
                 latency_ms=int((time.perf_counter() - started) * 1000),

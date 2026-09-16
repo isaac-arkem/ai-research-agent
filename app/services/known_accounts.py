@@ -50,6 +50,47 @@ SKIP_TOKENS = {
     "scraping",
 }
 
+# Words that never appear inside a list of account names, and so mark where
+# the list ended and the sentence resumed. SKIP_TOKENS are passed over ("and",
+# "on Instagram"); these stop the walk outright.
+PROSE_TOKENS = {
+    "about",
+    "because",
+    "beacuse",
+    "can",
+    "find",
+    "for",
+    "get",
+    "his",
+    "her",
+    "their",
+    "i",
+    "if",
+    "in",
+    "is",
+    "it",
+    "me",
+    "my",
+    "of",
+    "or",
+    "our",
+    "so",
+    "specific",
+    "than",
+    "them",
+    "then",
+    "they",
+    "to",
+    "want",
+    "we",
+    "what",
+    "which",
+    "who",
+    "why",
+    "you",
+    "your",
+}
+
 NICHE_SLUG_RE = re.compile(r"^[a-z0-9_]+$")
 PLATFORM_WORD_RE = re.compile(
     r"\b(tiktok|instagram|insta|reels)\b|\b(?:ig|tt)\b",
@@ -86,13 +127,37 @@ def extract_handles(*texts: str) -> List[str]:
     for match in HANDLE_RE.finditer(blob):
         add(match.group(1))
 
-    scrape_tail = BARE_AFTER_SCRAPE_RE.split(blob, maxsplit=1)
-    if len(scrape_tail) > 1:
-        for token in re.split(r"[\s,+/&]+", scrape_tail[1]):
-            stopped = _clean_handle(token)
-            if stopped in {"for", "about", "because"}:
-                break
-            add(token)
+    # Bare names after "scrape" — "scrape isaac and dave". Three guards, and
+    # any of them abandons the whole bare list rather than truncating it.
+    #
+    # Truncating is what turned "scrape sarkodie's specific profiles so find
+    # his handles" into the accounts ['specific', 'so', 'find', 'his'] — four
+    # English words promoted to handles because the walk skipped what it could
+    # not parse and kept going. That flipped the turn into a named-account job,
+    # which bypasses research entirely, and every reply after it was read as
+    # answering a question about those four accounts. The operator asked eight
+    # times to have Sarkodie's handles found and got the same question back.
+    #
+    # The asymmetry is deliberate. Missing a bare-name list costs one search
+    # the operator can redirect in a sentence; inventing one silences research
+    # for the rest of the thread.
+    if not found:  # some names carry @ — then ALL the names do, and we have them
+        scrape_tail = BARE_AFTER_SCRAPE_RE.split(blob, maxsplit=1)
+        if len(scrape_tail) > 1:
+            bare: List[str] = []
+            for token in re.split(r"[\s,+/&]+", scrape_tail[1]):
+                cleaned = _clean_handle(token)
+                if cleaned in PROSE_TOKENS:
+                    bare = []  # a sentence, not a list of names
+                    break
+                if not cleaned or cleaned in SKIP_TOKENS:
+                    continue  # a connector: "and", "on Instagram", "accounts"
+                if not HANDLE_TOKEN_RE.fullmatch(cleaned):
+                    bare = []  # "sarkodie's" — prose punctuation, so prose
+                    break
+                bare.append(token)
+            for token in bare:
+                add(token)
 
     return found
 

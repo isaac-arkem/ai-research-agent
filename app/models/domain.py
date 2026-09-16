@@ -295,6 +295,32 @@ class Creator(BaseModel):
     profile_url: Optional[str] = None
 
 
+class MarketFinding(BaseModel):
+    """A country or region the sources put forward as worth researching.
+
+    The answer to "in what country can I get dark-skinned influencers" is a
+    list of these, not a list of handles. Before this existed that question
+    came back as two creators and twenty-seven hashtags — the right machinery
+    answering the wrong question, because creators were the only shape a
+    finding could take.
+
+    `iso` is filled only when the name resolves against the supported market
+    list. An unresolved market is still worth showing: the operator learns the
+    country is interesting even when we cannot scrape it there, and that is
+    better than being shown nothing.
+    """
+
+    name: str
+    iso: Optional[str] = None
+    # Whether this resolved to a market the scraper can target. False is a
+    # fact the operator needs BEFORE they pick it and try to plan against it.
+    supported: bool = False
+    why: str = ""
+    # 1-based index into the findings, so the claim traces back to its page.
+    source: Optional[int] = None
+    source_url: Optional[str] = None
+
+
 class AgentResult(BaseModel):
     """The final package returned to whoever called the agent.
 
@@ -321,6 +347,8 @@ class AgentResult(BaseModel):
     findings: Optional[List[WebFinding]] = None
     creators: Optional[List[Creator]] = None
     hashtags: Optional[List[Hashtag]] = None
+    # Countries the search put forward, when the question was about WHERE.
+    markets: Optional[List[MarketFinding]] = None
     searched_for: Optional[str] = None
     awaiting_approval: Optional[bool] = None
 
