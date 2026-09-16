@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     # model is the right tool — it writes one line of JSON, and it runs on
     # every ask, so gpt-4o's price for it would be paid on every request.
     grounding_model: str = "gpt-4o-mini"
+    # Re-asked on ONE routing call the small model gets wrong: a skip that
+    # blames named accounts on a message carrying no "@". Measured side by
+    # side, gpt-4o routes "give me sarkodie and stonebwoy handles" to a search
+    # and gpt-4o-mini routes it to skip — a capability difference, not a
+    # wording one, which is why rewriting the instruction did not fix it.
+    # Set to "" to turn escalation off and take the small model's answer.
+    grounding_escalation_model: str = "gpt-4o"
 
     # ── Multi-source research engine ────────────────────────────────────
     # With this on, a search fans out across Reddit, Hacker News, Instagram,

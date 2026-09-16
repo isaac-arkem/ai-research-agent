@@ -45,7 +45,7 @@ def test_a_question_about_one_person_never_calls_a_paid_lane(monkeypatch):
     had posted under #sarkodie — and every one of them was paid for. His own
     handles come off the web lane, which reads his profile pages. So the
     scrape is not run and filtered, it is not run."""
-    called, result = _run(monkeypatch, subject="Sarkodie",
+    called, result = _run(monkeypatch, subjects=["Sarkodie"],
                           force_lanes=["instagram", "tiktok"])
 
     assert "instagram" not in called
@@ -59,7 +59,7 @@ def test_a_question_about_one_person_never_calls_a_paid_lane(monkeypatch):
 def test_a_list_question_still_scrapes_the_named_platforms(monkeypatch):
     """The subject gate must not become a second scrape gate. A list question
     naming Instagram and TikTok still queries both."""
-    called, result = _run(monkeypatch, subject=None,
+    called, result = _run(monkeypatch, subjects=[],
                           force_lanes=["instagram", "tiktok"])
 
     assert "instagram" in called
@@ -69,7 +69,7 @@ def test_a_list_question_still_scrapes_the_named_platforms(monkeypatch):
 
 def test_no_platform_named_still_means_no_scrape(monkeypatch):
     """The original cost guard is unchanged by the subject gate."""
-    called, _ = _run(monkeypatch, subject=None, force_lanes=[])
+    called, _ = _run(monkeypatch, subjects=[], force_lanes=[])
 
     assert "instagram" not in called
     assert "tiktok" not in called

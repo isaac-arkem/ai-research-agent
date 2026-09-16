@@ -509,7 +509,7 @@ def run_research(
     resolved_handles: Optional[set] = None,
     answer: Optional[str] = None,
     force_lanes: Optional[List[str]] = None,
-    subject: Optional[str] = None,
+    subjects: Optional[List[str]] = None,
     max_workers: int = 6,
     **lane_options: Any,
 ) -> ResearchResult:
@@ -552,10 +552,11 @@ def run_research(
             # filtering came first and was the wrong half of the fix: it made
             # the answer clean while still paying Apify for every account it
             # threw away.
-            if subject and source in PAID_LANES:
+            if subjects and source in PAID_LANES:
+                who = ", ".join(subjects)
                 outcomes.append(LaneOutcome(
                     source, "skipped", 0,
-                    f"not scraped — the question is about {subject}, "
+                    f"not scraped — the question is about {who}, "
                     "and a hashtag sweep returns whoever posted under the tag",
                 ))
                 continue

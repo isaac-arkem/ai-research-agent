@@ -2159,7 +2159,7 @@ def test_a_question_about_one_person_is_answered_with_that_person():
     last because post authors lead the merge. The question named one person,
     so one person is the answer."""
     from app.models.domain import Creator
-    from app.services.grounding import _only_the_subject
+    from app.services.grounding import _only_the_subjects
 
     found = [
         Creator(name="Sarkodie Ba Chosen\u00b9.e", handle="de.chosen.one41",
@@ -2170,22 +2170,86 @@ def test_a_question_about_one_person_is_answered_with_that_person():
         Creator(name="Sarkodie", handle="sarkodie.official", platform="tiktok", why="his"),
         Creator(name="Sarkodie", handle="sarkodie", platform="instagram", why="his"),
     ]
-    kept = _only_the_subject(found, "Sarkodie")
+    kept = _only_the_subjects(found, ["Sarkodie"])
     assert [c.handle for c in kept] == ["sarkodie.official", "sarkodie"]
 
     # A name that merely CONTAINS the subject is a different person.
     assert all("chosen" not in c.handle for c in kept)
 
     # No subject means a list question, and a list question keeps its list.
-    assert _only_the_subject(found, None) == found
+    assert _only_the_subjects(found, []) == found
 
     # A subject nothing matches falls back rather than emptying the answer.
-    assert _only_the_subject(found, "Stonebwoy") == found
+    assert _only_the_subjects(found, ["Stonebwoy"]) == found
 
 
 def test_the_router_is_told_when_to_set_a_subject():
     from app.services.grounding import TRIAGE_SYSTEM
 
-    assert '"subject" IS THE ONE PERSON THE QUESTION IS ABOUT' in TRIAGE_SYSTEM
-    assert "null almost always" in TRIAGE_SYSTEM
+    assert '"subjects" IS THE PEOPLE THE QUESTION IS ABOUT BY NAME' in TRIAGE_SYSTEM
+    assert "[] almost always" in TRIAGE_SYSTEM
+    assert "A FOLLOW-UP THAT NARROWS A LIST DOWN TO PARTICULAR PEOPLE" in TRIAGE_SYSTEM
     assert "AN ACCOUNT IS AN @HANDLE OR A PROFILE URL" in TRIAGE_SYSTEM
+
+
+# ── the router is upgraded, never overridden ─────────────────────────
+
+
+def _models_asked(client):
+    """Which models the stubbed client was actually called with, in order."""
+    return [c.kwargs.get("model") for c in client.chat.completions.create.call_args_list]
+
+
+def test_a_skip_that_names_no_account_is_re_asked_of_the_larger_model():
+    """"give me sarkodie and stonebwoy handles" names two PEOPLE. gpt-4o-mini
+    routes it to skip, reading "X and Y ... handles" as "@isaac and @dave";
+    gpt-4o gets it right on the identical prompt. So the model is upgraded,
+    not the decision overridden."""
+    client = _triage('{"action":"skip","reason":"the operator named specific accounts"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search("give me sarkodie and stonebwoy handles", _ctx(),
+                      openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini", "gpt-4o"]
+
+
+def test_a_skip_on_a_message_carrying_an_at_handle_is_left_alone():
+    """The small model is right when accounts really are named — no second call."""
+    client = _triage('{"action":"skip","reason":"named accounts"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search("scrape @isaac and @dave", _ctx(),
+                      openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini"]
+
+
+def test_an_ordinary_skip_is_not_escalated():
+    """A greeting or the weather costs one call, not two."""
+    client = _triage('{"action":"skip","reason":"GREETING / SMALL TALK"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search("hi", _ctx(), openai_key="sk",
+                      model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini"]
+
+
+def test_the_escalated_answer_is_still_respected_when_it_skips():
+    """Upgrading the model must not become a way of forcing a search."""
+    client = _triage('{"action":"skip","reason":"named accounts"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        routed = triage_search("tech-giants", _ctx(), openai_key="sk",
+                               model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert routed["action"] == "skip"
+
+
+def test_several_named_people_are_all_kept():
+    """"only send me the handles of sarkodie and stonebwoy" narrows a list to
+    two people, so both survive and nobody else does."""
+    from app.models.domain import Creator
+    from app.services.grounding import _only_the_subjects
+
+    found = [
+        Creator(name="Sark Updates Tv", handle="sarkupdatestv", platform="tiktok", why="fan"),
+        Creator(name="Sarkodie", handle="sarkodie", platform="instagram", why="his"),
+        Creator(name="Black Sherif", handle="blacksherif", platform="instagram", why="other"),
+        Creator(name="Stonebwoy", handle="stonebwoyb", platform="tiktok", why="his"),
+    ]
+    kept = _only_the_subjects(found, ["Sarkodie", "Stonebwoy"])
+    assert [c.name for c in kept] == ["Sarkodie", "Stonebwoy"]
