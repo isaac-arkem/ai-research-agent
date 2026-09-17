@@ -53,6 +53,10 @@ from app.models.domain import (
     MarketFinding,
     WebFinding,
 )
+from app.services.known_accounts import (
+    accounts_are_references,
+    extract_handles,
+)
 from app.services.prompt import UNRESEARCHABLE
 from app.services.search import (
     SearchError,
@@ -1540,6 +1544,25 @@ def _is_a_subject(creator: Creator, subjects: Sequence[str]) -> bool:
     return False
 
 
+def _drop_the_seeds(
+    creators: List[Creator], seeds: Optional[Sequence[str]]
+) -> List[Creator]:
+    """Remove the accounts the operator was comparing AGAINST.
+
+    "Creators similar to @sarkodie" is answered by other people. Sarkodie
+    himself is the one name that cannot be part of the answer, and he is also
+    the name most likely to come back, because every page about creators like
+    him is a page about him.
+    """
+    if not seeds:
+        return creators
+    kept = [c for c in creators if not _is_a_subject(c, seeds)]
+    dropped = len(creators) - len(kept)
+    if dropped:
+        logger.info("web grounding: dropped %d seed account(s) from their own lookalikes", dropped)
+    return kept
+
+
 def _only_the_subjects(
     creators: List[Creator], subjects: Optional[Sequence[str]]
 ) -> List[Creator]:
@@ -1865,6 +1888,7 @@ def _research_via_engine(
     triage_ms: Optional[int],
     answer: str = "overview",
     subjects: Optional[Sequence[str]] = None,
+    seeds: Optional[Sequence[str]] = None,
     ctx: Optional[AgentContext] = None,
     history: Optional[Sequence[ChatTurn]] = None,
 ) -> Optional[WebContext]:
@@ -1966,6 +1990,8 @@ def _research_via_engine(
         )
     # One named person was asked about, so one named person is the answer.
     creators = _only_the_subjects(creators, subjects)
+    # ...and never answer "who is like X" with X.
+    creators = _drop_the_seeds(creators, seeds)
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
         history=history, settings=settings,
@@ -2082,6 +2108,17 @@ def gather_web_context(
     market = _market_for(ctx, routed.get("country"))
     answer = routed.get("answer") or "overview"
     subjects = [str(n).strip() for n in (routed.get("subjects") or []) if str(n).strip()]
+    # In a comparison the named people are SEEDS, not the answer. Keeping them
+    # as subjects does two wrong things at once: it filters the creator list
+    # down to the very accounts the operator already has, and it trips the
+    # paid-lane gate, so the lookalike search runs without the social lanes
+    # that carry handles and follower counts.
+    seeds: List[str] = []
+    if accounts_are_references(prompt):
+        seeds = subjects + [h for h in extract_handles(prompt) if h not in subjects]
+        subjects = []
+        if seeds:
+            logger.info("web grounding: %r are seeds, not the answer — searching for others", seeds)
     # The router's self-contained topic, falling back to the operator's own
     # words. The fallback is not a degraded path — for a question that already
     # stands alone the two are the same string, and verbatim is what we want.
@@ -2117,7 +2154,7 @@ def gather_web_context(
         engine_context = _research_via_engine(
             prompt=asked, query=query, market=market, settings=settings,
             emit=emit, triage_ms=triage_ms, answer=answer, ctx=ctx,
-            subjects=subjects, history=history,
+            subjects=subjects, seeds=seeds, history=history,
         )
         if engine_context is not None:
             return engine_context

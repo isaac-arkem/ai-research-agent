@@ -3,6 +3,7 @@ from app.services.known_accounts import (
     KnownAccount,
     extract_handles,
     handles_needing_platform,
+    accounts_are_references,
     lookup_known_accounts,
     names_accounts,
     platform_clarifying_question,
@@ -157,3 +158,36 @@ def test_prompt_lists_handles_that_still_need_a_platform():
     assert "HANDLES NOT IN THE CATALOG" in prompt
     assert "@ernest" in prompt
     assert "Do NOT return a ResearchPlan" in prompt
+
+
+def test_a_comparison_names_seeds_not_a_job():
+    """"Find creators similar to @sarkodie and @shattawale" asks for OTHER
+    people. Read as a named-account job it never reached the search at all —
+    it went straight to a plan to scrape the two accounts being compared
+    against, and the platform question stalled it on a field that gates
+    nothing."""
+    cmp_ = (
+        "Find creators similar to @sarkodie and @shattawale, "
+        "then rank them by similarity and engagement rate."
+    )
+    assert accounts_are_references(cmp_)
+    assert not names_accounts(cmp_)
+    assert handles_needing_platform(cmp_, []) == []
+
+    for phrasing in ("creators like @sarkodie", "lookalikes for @sarkodie",
+                     "accounts comparable to @sarkodie", "competitors of @sarkodie",
+                     "in the style of @sarkodie", "who resembles @sarkodie"):
+        assert accounts_are_references(phrasing), phrasing
+        assert not names_accounts(phrasing), phrasing
+
+    # ...and a real job is still a real job
+    for job in ("scrape @sarkodie and @shattawale", "Scrape @khloekardashian on Instagram",
+                "@isaac and @dave", "scrape isaac and dave"):
+        assert not accounts_are_references(job), job
+        assert names_accounts(job), job
+
+
+def test_would_like_is_not_a_comparison():
+    """"like" carries the comparison, but not in "would like to"."""
+    assert not accounts_are_references("I would like to scrape @isaac")
+    assert names_accounts("I would like to scrape @isaac")

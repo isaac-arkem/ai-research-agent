@@ -325,6 +325,36 @@ def continues_named_account_job(
     return False
 
 
+# A named account is not always the target. "scrape @sarkodie" asks for that
+# account; "creators similar to @sarkodie" asks for OTHER accounts, and names
+# him only to say what they should be like. The words below are what separates
+# the two, and getting it wrong is expensive in one direction: read as a target,
+# a comparison never reaches the search at all — it goes straight to a scrape
+# job for the two accounts the operator was comparing AGAINST.
+#
+# "like" is in here but cannot be matched bare: "I would like to scrape @isaac"
+# is not a comparison. It counts only where it is not preceded by would/should/'d
+# and not followed by "to".
+_COMPARISON_RE = re.compile(
+    r"\b(?:similar|similarly|similar\s+to|lookalikes?|look-alikes?|"
+    r"comparable|compares?|comparison|competitors?|alternatives?|"
+    r"resembl\w+|in\s+the\s+style\s+of|same\s+(?:style|vibe|kind|sort)\s+as)\b"
+    r"|(?<!would )(?<!should )(?<!'d )\blike\b(?!\s+to\b)",
+    re.IGNORECASE,
+)
+
+
+def accounts_are_references(text: str) -> bool:
+    """Does this message name accounts as a COMPARISON, not as the job?
+
+    When it does, the handles are inputs to a search — the seeds — and the
+    answer is other people entirely. Treating them as the job is what turned
+    "Find creators similar to @sarkodie and @shattawale, then rank them by
+    similarity and engagement rate" into a plan to scrape those two accounts.
+    """
+    return bool(text) and bool(_COMPARISON_RE.search(text))
+
+
 def names_accounts(prompt: str) -> bool:
     """Does THIS message name accounts to scrape?
 
@@ -338,6 +368,9 @@ def names_accounts(prompt: str) -> bool:
     So: an unambiguous, free check for the unambiguous case. Everything that
     depends on context is decided by triage, which has the history.
     """
+    if accounts_are_references(prompt):
+        # Seeds, not a job. Let the router read the sentence.
+        return False
     return bool(extract_handles(prompt))
 
 
@@ -347,6 +380,10 @@ def handles_needing_platform(
     known: Optional[Sequence[KnownAccount]] = None,
 ) -> List[str]:
     """Named handles with no catalog platform and no operator platform."""
+    if accounts_are_references(prompt):
+        # The platform of a SEED does not gate anything: we are not scraping
+        # it. Asking for it here stalls the search behind an irrelevant field.
+        return []
     texts = _user_texts(prompt, history)
     named = extract_handles(*texts)
     known_h = {account.handle.lower() for account in (known or [])}

@@ -2253,3 +2253,22 @@ def test_several_named_people_are_all_kept():
     ]
     kept = _only_the_subjects(found, ["Sarkodie", "Stonebwoy"])
     assert [c.name for c in kept] == ["Sarkodie", "Stonebwoy"]
+
+
+def test_a_seed_is_never_its_own_lookalike():
+    """Every page about creators like Sarkodie is a page about Sarkodie, so he
+    is the name most likely to come back — and the one name that cannot be
+    part of the answer."""
+    from app.models.domain import Creator
+    from app.services.grounding import _drop_the_seeds
+
+    found = [
+        Creator(name="Sarkodie", handle="sarkodie", platform="tiktok", why="seed"),
+        Creator(name="Shatta Wale", handle="shattawale", platform="tiktok", why="seed"),
+        Creator(name="Medikal", handle="amgmedikal", platform="tiktok", why="rap peer"),
+        Creator(name="Samini", handle="samini", platform="tiktok", why="dancehall"),
+    ]
+    kept = _drop_the_seeds(found, ["sarkodie", "shattawale"])
+    assert [c.name for c in kept] == ["Medikal", "Samini"]
+    # No seeds is the ordinary case and must change nothing.
+    assert _drop_the_seeds(found, []) == found
