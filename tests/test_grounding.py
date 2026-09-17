@@ -2272,3 +2272,68 @@ def test_a_seed_is_never_its_own_lookalike():
     assert [c.name for c in kept] == ["Medikal", "Samini"]
     # No seeds is the ordinary case and must change nothing.
     assert _drop_the_seeds(found, []) == found
+
+
+# ── choosing what "similar" means ────────────────────────────────────
+
+
+def _pages(n=3):
+    from app.models.domain import WebFinding
+    return [WebFinding(title=f"T{i}", url=f"https://x{i}.com", snippet="",
+                       content="body " * 60) for i in range(1, n + 1)]
+
+
+def test_the_basis_is_offered_only_when_the_operator_did_not_give_one():
+    """"rank them by engagement rate" already says what similar means. Asking
+    which basis to use would be asking a question they answered — the exact
+    thing this path exists to stop."""
+    from app.services.grounding import _bases_worth_offering
+
+    assert _bases_worth_offering(
+        _pages(), "creators similar to @sarkodie, rank them by engagement rate",
+        seeds=["sarkodie"], settings=_settings()) == []
+
+    # ...and it is not offered when nothing was being compared.
+    assert _bases_worth_offering(
+        _pages(), "top ghanaian musicians", seeds=[], settings=_settings()) == []
+
+
+def test_one_basis_is_not_a_choice():
+    """A single option is the answer, not a question. Showing it as a choice
+    asks the operator to pick from a list of one."""
+    from app.models.domain import ComparisonBasis
+    from app.services.grounding import extract_comparison_bases
+
+    one = '{"bases": [{"label": "same music style", "why": "w", "source": 1}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(one)):
+        assert extract_comparison_bases(_pages(), "similar to @x", openai_key="sk") == []
+
+    two = ('{"bases": [{"label": "same music style", "why": "w", "source": 1},'
+           ' {"label": "similar level of reach", "why": "w", "source": 2}]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(two)):
+        out = extract_comparison_bases(_pages(), "similar to @x", openai_key="sk")
+    assert [b.label for b in out] == ["same music style", "similar level of reach"]
+    assert isinstance(out[0], ComparisonBasis)
+
+
+def test_a_basis_cites_a_real_page_and_never_invents_a_url():
+    """The URL comes from the finding at the model's index, never from the
+    model — the rule that keeps market citations honest, applied here."""
+    from app.services.grounding import extract_comparison_bases
+
+    payload = ('{"bases": [{"label": "same audience", "why": "w", "source": 2},'
+               ' {"label": "same era", "why": "w", "source": 99},'
+               ' {"label": "made up", "why": "w", "source": "not-an-int"}]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(payload)):
+        out = extract_comparison_bases(_pages(3), "similar to @x", openai_key="sk")
+
+    assert out[0].source_url == "https://x2.com"      # index resolved to the page
+    assert out[1].source is None and out[1].source_url is None   # out of range
+    assert out[2].source is None and out[2].source_url is None   # not an integer
+
+
+def test_extraction_failure_costs_the_options_not_the_turn():
+    from app.services.grounding import extract_comparison_bases
+
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")):
+        assert extract_comparison_bases(_pages(), "similar to @x", openai_key="sk") == []

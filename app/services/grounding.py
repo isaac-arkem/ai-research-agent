@@ -46,6 +46,7 @@ from typing import Callable, List, Optional, Sequence
 from openai import OpenAI
 
 from app.models.domain import (
+    ComparisonBasis,
     AgentContext,
     ChatTurn,
     Creator,
@@ -271,6 +272,10 @@ class WebContext:
     # Countries the sources pointed to. Populated only when answer="markets",
     # where they ARE the answer.
     markets: List[MarketFinding] = field(default_factory=list)
+    # Ways to define "similar", when the operator asked for similarity without
+    # saying what kind. Empty when the sources do not divide, which is the
+    # ordinary case and means no question is put to them.
+    comparison_bases: List[ComparisonBasis] = field(default_factory=list)
     country: Optional[str] = None
     window: Optional[str] = None
     # What the question asked for: markets | creators | overview. Decides
@@ -1054,6 +1059,97 @@ def _drop_news_subjects(creators: List[Creator]) -> List[Creator]:
     return kept
 
 
+COMPARISON_BASIS_SYSTEM = """You read web pages and report the ways they compare people.
+
+The operator asked for creators SIMILAR to some named accounts, without saying what similar means. Your job is to list the bases of comparison the SOURCES actually use — so the operator can pick one — and nothing else.
+
+Return JSON: {"bases": [{"label": "...", "why": "...", "source": <1-based index>}]}
+
+A BASIS IS A WAY OF BEING ALIKE, NOT A GROUP OF PEOPLE. "Same music style" is a basis. "Rappers" is a group. Do not list people, do not sort anyone, do not name a single creator in the label. The operator is choosing a QUESTION, not an answer.
+
+READ THEM OUT OF THE PAGES. If the sources compare artists by genre, "same genre" is a basis. If they rank by streams or followers, "similar level of reach" is a basis. If they talk about who a fanbase overlaps with, "same audience" is a basis. If no page draws a distinction, return an empty list — an option nobody wrote down is one you invented.
+
+Never offer a basis the pages do not support, however sensible it sounds. "Similar posting frequency" is a reasonable idea and belongs nowhere near this list unless a source actually discussed it.
+
+"label" is three to six plain words, in the operator's language, phrased as the thing they would pick: "same music style", "similar size of following", "same audience", "same country and scene", "same era".
+
+"why" is one short line saying what choosing it would get them — the DIFFERENCE it makes, not a restatement of the label.
+
+"source" is the 1-based index of a result that supports it. Every basis needs one.
+
+Two to four bases. If the pages really only support one way of comparing, return that one alone — the operator is then shown no choice, which is correct."""
+
+
+def extract_comparison_bases(
+    findings: Sequence[WebFinding],
+    prompt: str,
+    *,
+    openai_key: str,
+    model: str = "gpt-4o-mini",
+    timeout: float = 20.0,
+) -> List[ComparisonBasis]:
+    """The ways these sources let you define "similar".
+
+    Read out of the pages rather than picked from a list, for the same reason
+    the search query is sent verbatim: any option we supply ourselves is a
+    decision the operator never saw us make.
+
+    Returns [] on any failure, and [] is a valid answer — it means the pages
+    do not divide, and the operator should be shown the list rather than a
+    question.
+    """
+    if not findings:
+        return []
+
+    numbered = "\n\n".join(
+        f"[{i}] {f.title}\n{(f.snippet or '')}\n{(f.content or '')[:MAX_EXTRACT_CHARS]}"
+        for i, f in enumerate(findings, start=1)
+    )
+    try:
+        client = OpenAI(api_key=openai_key, timeout=timeout)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": COMPARISON_BASIS_SYSTEM},
+                {"role": "user",
+                 "content": f"The operator asked: {prompt}\n\nResults:\n{numbered}"},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        parsed = _extract_json(response.choices[0].message.content or "")
+    except Exception as exc:
+        logger.warning("web grounding: comparison-basis extraction failed: %s", exc)
+        return []
+
+    rows = parsed.get("bases")
+    if not isinstance(rows, list):
+        return []
+
+    bases: List[ComparisonBasis] = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label") or "").strip()
+        if not label or label.lower() in seen:
+            continue
+        seen.add(label.lower())
+        index = row.get("source")
+        index = index if isinstance(index, int) and 1 <= index <= len(findings) else None
+        bases.append(
+            ComparisonBasis(
+                label=label[:60],
+                why=str(row.get("why") or "").strip()[:160],
+                source=index,
+                # Taken from the finding, never asked of the model.
+                source_url=findings[index - 1].url if index else None,
+            )
+        )
+    # One option is not a choice; it is the answer. Two is the smallest choice.
+    return bases[:4] if len(bases) > 1 else []
+
+
 def extract_markets(
     findings: Sequence[WebFinding],
     prompt: str,
@@ -1544,6 +1640,45 @@ def _is_a_subject(creator: Creator, subjects: Sequence[str]) -> bool:
     return False
 
 
+# Words that already say what "similar" means. "rank them by engagement rate"
+# names the basis, so asking which basis to use would be asking a question the
+# operator has answered — the thing this whole path exists to avoid.
+_BASIS_ALREADY_GIVEN = re.compile(
+    r"\b(?:engagement|followers?|follower\s+count|reach|audience\s+size|"
+    r"genre|style|sound|niche|language|location|country|region|age|"
+    r"posting\s+frequency|views?|streams?)\b",
+    re.IGNORECASE,
+)
+
+
+def _bases_worth_offering(
+    findings: List[WebFinding], prompt: str, *, seeds, settings
+) -> List[ComparisonBasis]:
+    """Offer a choice of basis only when the operator did not already make it.
+
+    Three conditions, and all of them have to hold. The turn has to be a
+    comparison, or there is nothing to define. The operator must not have said
+    what similar means, because asking then is just not listening. And the
+    sources have to actually divide — an option nobody wrote down is one we
+    invented, and inventing it is the thing being avoided.
+    """
+    if not seeds:
+        return []
+    if _BASIS_ALREADY_GIVEN.search(prompt or ""):
+        logger.info("web grounding: the operator named the basis — not offering a choice")
+        return []
+    try:
+        return extract_comparison_bases(
+            findings, prompt,
+            openai_key=settings.openai_api_key,
+            model=settings.grounding_model,
+            timeout=settings.search_timeout,
+        )
+    except Exception as exc:  # never break the turn over an optional extra
+        logger.warning("web grounding: comparison bases failed: %s", exc)
+        return []
+
+
 def _drop_the_seeds(
     creators: List[Creator], seeds: Optional[Sequence[str]]
 ) -> List[Creator]:
@@ -1992,6 +2127,7 @@ def _research_via_engine(
     creators = _only_the_subjects(creators, subjects)
     # ...and never answer "who is like X" with X.
     creators = _drop_the_seeds(creators, seeds)
+    bases = _bases_worth_offering(findings, prompt, seeds=seeds, settings=settings)
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
         history=history, settings=settings,

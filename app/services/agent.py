@@ -178,6 +178,7 @@ def generate_research_plan(
                 creators=web.creators,
                 hashtags=web.hashtags,
                 markets=web.markets,
+                comparison_bases=web.comparison_bases,
                 searched_for=web.query,
                 awaiting_approval=True,
                 latency_ms=int((time.perf_counter() - started) * 1000),

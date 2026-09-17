@@ -8,6 +8,7 @@ from .domain import (
     Creator,
     FlowName,
     Hashtag,
+    ComparisonBasis,
     MarketFinding,
     ResearchPlan,
     WebFinding,
@@ -73,6 +74,9 @@ class AskResponse(BaseModel):
     # response the console has nothing to render and falls back to showing
     # only source cards — which reads as "go read them yourself".
     markets: Optional[List[MarketFinding]] = None
+    # Ways to define "similar", for the operator to pick one. Absent unless
+    # the question asked for similarity without saying what kind.
+    comparison_bases: Optional[List[ComparisonBasis]] = None
     searched_for: Optional[str] = None
     awaiting_approval: Optional[bool] = None
 

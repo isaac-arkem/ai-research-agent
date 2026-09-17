@@ -321,6 +321,33 @@ class MarketFinding(BaseModel):
     source_url: Optional[str] = None
 
 
+class ComparisonBasis(BaseModel):
+    """One way the sources let you define "similar", offered as a choice.
+
+    "Find creators similar to @sarkodie and @shattawale" does not say what
+    similar means, and the answer changes completely depending on which one
+    you pick: same music style gives you other rappers, same level of fame
+    gives you Ghana's biggest names whatever they sound like.
+
+    Something has to choose. Before this, that something was us — a word
+    quietly added to the search query, the way "popular music artists in
+    Ghana" once went out as "top Instagram influencers Ghana". The operator
+    never saw the choice being made and never got to disagree with it.
+
+    So the choice is surfaced instead of taken. The options are read out of
+    the pages the search already paid for, not from a fixed list: a fixed
+    list is the same silent choice made earlier and more politely.
+
+    `source` is a 1-based index into the findings, so an option traces back
+    to the page that supports it and cannot be a plausible-sounding invention.
+    """
+
+    label: str
+    why: str = ""
+    source: Optional[int] = None
+    source_url: Optional[str] = None
+
+
 class AgentResult(BaseModel):
     """The final package returned to whoever called the agent.
 
@@ -333,6 +360,9 @@ class AgentResult(BaseModel):
     clarifying_question: Optional[str] = None
     understood_so_far: Optional[str] = None
     missing_fields: Optional[List[str]] = None
+    # Ways to define "similar", when the question asked for similarity
+    # without saying what kind. Empty when the sources do not divide.
+    comparison_bases: Optional[List[ComparisonBasis]] = None
     validation: Optional[ValidationResult] = None
     raw: Optional[str] = None
     error: Optional[str] = None
