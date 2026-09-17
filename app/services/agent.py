@@ -169,6 +169,19 @@ def generate_research_plan(
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+        if web.action == "respond":
+            # Answered from the conversation. No plan, no findings, no sources
+            # — the answer IS the reply, and re-rendering the previous turn's
+            # creator cards underneath it would suggest a fresh search ran.
+            return AgentResult(
+                ok=True,
+                plan=None,
+                understood_so_far=web.prose,
+                clarifying_question=web.next_step,
+                missing_fields=[],
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
         if web.action == "search":
             # The review turn: sources, no plan. understood_so_far is the
             # sentence the console prints, and `findings` is what it renders

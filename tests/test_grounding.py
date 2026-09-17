@@ -2371,3 +2371,67 @@ def test_asking_the_basis_spends_no_search():
     assert [b.label for b in web.comparison_bases] == [
         "same music style", "similar level of fame"
     ]
+
+
+# ── answering without searching ──────────────────────────────────────
+
+
+def test_a_respond_turn_spends_no_search():
+    """"among these, which are from Armenia?" is an operation on a list already
+    on screen. With nowhere to put it, the router searched — the topic went out
+    as "Armenia comedians from the previous list" and came back with 45
+    creators, five MORE than the list the operator asked to narrow."""
+    client = _triage('{"action":"respond","reason":"operates on the list shown"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding.respond_from_thread",
+                   return_value=("Nothing here records location.", "Search instead?")):
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context("among these, which are from Armenia?",
+                                         _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "respond"
+    assert web.prose == "Nothing here records location."
+    assert web.next_step == "Search instead?"
+    assert web.provider == "thread"
+
+
+def test_a_respond_that_cannot_answer_falls_back_to_the_planner():
+    """The worst case of adding this action is the behaviour without it."""
+    client = _triage('{"action":"respond","reason":"x"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding.respond_from_thread",
+                   return_value=(None, None)):
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context("sort them", _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "skip"
+
+
+def test_respond_needs_a_conversation_to_work_from():
+    """A question about "these" with nothing behind it is not answerable here."""
+    from app.services.grounding import respond_from_thread
+
+    assert respond_from_thread("sort these", None, openai_key="sk") == (None, None)
+    assert respond_from_thread("sort these", [], openai_key="sk") == (None, None)
+
+
+def test_a_respond_answer_reaches_the_caller():
+    """The third wiring fault of this shape: computed, then dropped."""
+    import inspect
+    from app.services import agent
+
+    src = inspect.getsource(agent.generate_research_plan)
+    assert 'web.action == "respond"' in src
+    assert "understood_so_far=web.prose" in src
+
+
+def test_the_router_is_taught_when_not_to_search():
+    from app.services.grounding import ACTIONS, TRIAGE_SYSTEM
+
+    assert "respond" in ACTIONS
+    assert 'THE QUESTION IS NOT "COULD THIS BE RESEARCHED"' in TRIAGE_SYSTEM
+    assert "OPERATION ON THE LIST ALREADY SHOWN" in TRIAGE_SYSTEM
+    # ...and when it still must.
+    assert 'NEW PEOPLE, NEW PLACES OR NEW NUMBERS ARE A "search"' in TRIAGE_SYSTEM
