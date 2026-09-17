@@ -257,6 +257,7 @@ def search_instagram_apify(
     depth: str = "default",
     token: str = None,
     ig_creators: List[str] | None = None,
+    hashtags: List[str] | None = None,
 ) -> Dict[str, Any]:
     """Instagram search via Apify: hashtag scrape of the topic plus optional
     creator profile posts."""
@@ -272,13 +273,30 @@ def search_instagram_apify(
     items: List[Dict[str, Any]] = []
     last_error = None
 
-    hashtag = _to_hashtag_form(core_topic)
-    if hashtag:
-        _log(f"Instagram hashtag actor run: #{hashtag} limit={limit}")
+    # Every resolved hashtag, not one derived from the topic.
+    #
+    # Deriving glues the question into a tag nobody uses: "Armenian comedians
+    # on Instagram and TikTok" became #armeniacomediansoninstagramtiktok,
+    # which has no posts, so the lane reported "no results" as though there
+    # were no Armenian comedians. The resolver already returns real tags —
+    # armeniancomedians, armeniacomedy, comedyarmenia — and the actor takes a
+    # LIST, so asking for all of them costs the same single run as asking for
+    # the first. Which mattered, because the resolver orders them most
+    # specific first, and the most specific tag is the likeliest to be empty.
+    tags = [
+        str(t).lstrip("#").strip()
+        for t in (hashtags or [])
+        if t and str(t).strip()
+    ]
+    if not tags:
+        derived = _to_hashtag_form(core_topic)
+        tags = [derived] if derived else []
+    if tags:
+        _log(f"Instagram hashtag actor run: {['#'+t for t in tags]} limit={limit}")
         try:
             raw_items = _run_actor(
                 IG_HASHTAG_ACTOR,
-                {"hashtags": [hashtag], "resultsType": "posts", "resultsLimit": limit},
+                {"hashtags": tags, "resultsType": "posts", "resultsLimit": limit},
                 token,
             )
         except Exception as e:

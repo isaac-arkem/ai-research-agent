@@ -461,6 +461,7 @@ def search_and_enrich(
     token: str = None,
     ig_creators: List[str] | None = None,
     apify_token: str = None,
+    hashtags: List[str] | None = None,
 ) -> Dict[str, Any]:
     """Full Instagram search: find reels, then fetch captions for top results.
 
@@ -492,6 +493,7 @@ def search_and_enrich(
             depth=depth,
             token=apify_token,
             ig_creators=ig_creators,
+            hashtags=hashtags,
         )
 
     core_topic = _extract_core_subject(topic)

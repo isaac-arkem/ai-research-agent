@@ -152,12 +152,16 @@ def _lane_instagram(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict)
     # the topic via _to_hashtag_form(_extract_core_subject(topic)). Handed the
     # planner's keyword query that yields #modestfashioncreatorssaudiarabia,
     # which matches nothing. So a resolved hashtag IS the query here.
+    # Every resolved hashtag reaches the actor, which takes a list — so three
+    # real tags cost the same single run as one. Taking hashtags[0] threw the
+    # rest away, and the resolver orders them most specific first, which is
+    # the one likeliest to have no posts behind it.
     hashtags = opts.get("hashtags") or []
-    query = hashtags[0] if hashtags else q
     result = instagram.search_and_enrich(
-        query, fd, td, depth=depth, token="",
+        hashtags[0] if hashtags else q, fd, td, depth=depth, token="",
         ig_creators=opts.get("ig_creators"),
         apify_token=cfg.get("APIFY_API_TOKEN"),
+        hashtags=hashtags,
     )
     return instagram.parse_instagram_response(result)
 
