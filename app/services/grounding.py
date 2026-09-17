@@ -592,7 +592,38 @@ Examples of the whole thing:
   {"reply": "Nigeria's top creators skew heavily to TikTok — five of the six here came out of TikTok's own 2025 awards [1], so this is a view of that platform rather than the market. Food and comedy dominate; @diaryofanortherncook is the clearest fit if Northern Nigerian cuisine is the angle.",
    "next": "Should I search Instagram specifically to balance this out, or plan a scrape with these TikTok accounts?"}
 
-Never describe the machinery. No "the search returned", no "based on the sources", no "I found N results"."""
+NEVER OFFER A NEXT STEP THIS SYSTEM CANNOT TAKE. The platforms it can actually search are listed for you below; YouTube, X, Facebook, LinkedIn, Twitch and the rest are not among them. Offering to "look on YouTube" reads as a real option, costs the operator a turn to accept, and then cannot be done — the search runs on the open web and comes back with the same kind of page it already had.
+
+You may still SAY that the evidence leans one way. "Almost all of this is Instagram" is a fact about what came back. "Shall I check YouTube?" is a promise. The first is useful; the second is not yours to make."""
+
+
+def _platforms_line() -> str:
+    """What the next step may offer, taken from the lanes that exist.
+
+    Written from LANES rather than typed into the prompt, so a lane added or
+    removed cannot leave the model offering something the system dropped — or
+    quietly failing to offer something it gained.
+    """
+    try:
+        from app.services.research import orchestrator
+        paid = sorted(orchestrator.PAID_LANES)
+        free = sorted(
+            s for s in orchestrator.LANES
+            if s not in orchestrator.PAID_LANES and s not in ("web",)
+        )
+    except Exception:  # the engine is optional; the web lane never is
+        paid, free = ["instagram", "tiktok"], ["grounding"]
+    named = {"grounding": "the open web", "hackernews": "Hacker News",
+             "tiktok": "TikTok", "instagram": "Instagram",
+             "reddit": "Reddit", "polymarket": "Polymarket"}
+    show = lambda k: named.get(k, k.title())
+    return (
+        "THE ONLY SOCIAL PLATFORMS THIS SYSTEM CAN SEARCH: "
+        + (", ".join(show(p) for p in paid) or "none")
+        + ". Other sources available: "
+        + ", ".join(show(f) for f in free)
+        + ". Anything else does not exist here — do not offer it."
+    )
 
 
 def synthesise_findings(
@@ -662,7 +693,8 @@ def synthesise_findings(
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": SYNTHESIS_SYSTEM},
+                {"role": "system",
+                 "content": SYNTHESIS_SYSTEM + "\n\n" + _platforms_line()},
                 {
                     "role": "user",
                     "content": (
@@ -1059,52 +1091,60 @@ def _drop_news_subjects(creators: List[Creator]) -> List[Creator]:
     return kept
 
 
-COMPARISON_BASIS_SYSTEM = """You read web pages and report the ways they compare people.
+# Far above what anyone would pick from; it exists so a broken model response
+# cannot return a thousand options.
+MAX_COMPARISON_BASES = 8
 
-The operator asked for creators SIMILAR to some named accounts, without saying what similar means. Your job is to list the bases of comparison the SOURCES actually use — so the operator can pick one — and nothing else.
+COMPARISON_BASIS_SYSTEM = """The operator asked for people SIMILAR to some named accounts, without saying what similar means. List the ways they could mean it, so they can pick one.
 
-Return JSON: {"bases": [{"label": "...", "why": "...", "source": <1-based index>}]}
+Return JSON: {"bases": [{"label": "...", "why": "..."}]}
 
-A BASIS IS A WAY OF BEING ALIKE, NOT A GROUP OF PEOPLE. "Same music style" is a basis. "Rappers" is a group. Do not list people, do not sort anyone, do not name a single creator in the label. The operator is choosing a QUESTION, not an answer.
+You are reading the NAMES, not a search result. Work out who these people are and what could sensibly distinguish one kind of "similar" from another FOR THEM. Two rappers are compared differently from two restaurants.
 
-READ THEM OUT OF THE PAGES. If the sources compare artists by genre, "same genre" is a basis. If they rank by streams or followers, "similar level of reach" is a basis. If they talk about who a fanbase overlaps with, "same audience" is a basis. If no page draws a distinction, return an empty list — an option nobody wrote down is one you invented.
+A BASIS IS A WAY OF BEING ALIKE, NOT A GROUP OF PEOPLE. "same music style" is a basis. "rappers" is a group. Never name a person: the operator is picking a QUESTION, not an answer.
 
-Never offer a basis the pages do not support, however sensible it sounds. "Similar posting frequency" is a reasonable idea and belongs nowhere near this list unless a source actually discussed it.
+MAKE THEM DIFFERENT FROM EACH OTHER. Each option must lead somewhere the others would not. "same genre" and "same kind of music" are one option written twice, and offering both wastes the operator's attention on a choice that is not one.
 
-"label" is three to six plain words, in the operator's language, phrased as the thing they would pick: "same music style", "similar size of following", "same audience", "same country and scene", "same era".
+ORDER THEM BY HOW MUCH THE CHOICE CHANGES THE ANSWER. The basis that produces the most different list of people goes first.
 
-"why" is one short line saying what choosing it would get them — the DIFFERENCE it makes, not a restatement of the label.
+WHEN THE SEEDS DISAGREE, SAY SO IN THE OPTIONS. Sarkodie raps and Shatta Wale does dancehall, so "same music style" splits them and "similar level of fame" does not. That difference is the most useful thing you can tell the operator, and it belongs in "why".
 
-"source" is the 1-based index of a result that supports it. Every basis needs one.
+"label" is three to six plain words, phrased as the thing they would pick: "same music style", "similar size of following", "same audience", "same country and scene", "same era", "same format".
 
-Two to four bases. If the pages really only support one way of comparing, return that one alone — the operator is then shown no choice, which is correct."""
+"why" is one short line saying what choosing it would GET them — the difference it makes, not a restatement of the label.
+
+Two to five options. IF YOU DO NOT RECOGNISE THE ACCOUNTS, RETURN AN EMPTY LIST. Guessing at what two strangers have in common produces options that sound plausible and mean nothing, and an empty list is handled: the search simply runs without asking."""
 
 
-def extract_comparison_bases(
-    findings: Sequence[WebFinding],
+def propose_comparison_bases(
     prompt: str,
+    seeds: Sequence[str],
     *,
     openai_key: str,
     model: str = "gpt-4o-mini",
     timeout: float = 20.0,
 ) -> List[ComparisonBasis]:
-    """The ways these sources let you define "similar".
+    """The ways "similar" could be meant, read off the accounts themselves.
 
-    Read out of the pages rather than picked from a list, for the same reason
-    the search query is sent verbatim: any option we supply ourselves is a
-    decision the operator never saw us make.
+    This used to read them out of the search results, on the principle that an
+    option nobody wrote down is one we invented. That principle is right for
+    facts — a country, a handle — and wrong here. A basis of comparison is not
+    a claim about the world; it is a way of framing the operator's question.
+    Requiring a page to have spelled it out made the feature silent: measured
+    on the same query twice, twelve sources about comedians yielded nothing,
+    because a thread saying "if you like Bill Burr try Tom Segura" lists names
+    without ever saying why.
 
-    Returns [] on any failure, and [] is a valid answer — it means the pages
-    do not divide, and the operator should be shown the list rather than a
-    question.
+    Asking first also costs less. The old order searched, offered options,
+    then searched again once one was picked — two searches, the first one's
+    results discarded.
+
+    Returns [] whenever it cannot do better than a guess, and [] is safe: the
+    caller searches exactly as it did before this existed.
     """
-    if not findings:
+    if not seeds:
         return []
-
-    numbered = "\n\n".join(
-        f"[{i}] {f.title}\n{(f.snippet or '')}\n{(f.content or '')[:MAX_EXTRACT_CHARS]}"
-        for i, f in enumerate(findings, start=1)
-    )
+    who = ", ".join(str(x) for x in seeds)
     try:
         client = OpenAI(api_key=openai_key, timeout=timeout)
         response = client.chat.completions.create(
@@ -1112,14 +1152,14 @@ def extract_comparison_bases(
             messages=[
                 {"role": "system", "content": COMPARISON_BASIS_SYSTEM},
                 {"role": "user",
-                 "content": f"The operator asked: {prompt}\n\nResults:\n{numbered}"},
+                 "content": f"The operator asked: {prompt}\n\nThe accounts they named: {who}"},
             ],
             temperature=0,
             response_format={"type": "json_object"},
         )
         parsed = _extract_json(response.choices[0].message.content or "")
     except Exception as exc:
-        logger.warning("web grounding: comparison-basis extraction failed: %s", exc)
+        logger.warning("web grounding: comparison-basis proposal failed: %s", exc)
         return []
 
     rows = parsed.get("bases")
@@ -1135,19 +1175,11 @@ def extract_comparison_bases(
         if not label or label.lower() in seen:
             continue
         seen.add(label.lower())
-        index = row.get("source")
-        index = index if isinstance(index, int) and 1 <= index <= len(findings) else None
         bases.append(
-            ComparisonBasis(
-                label=label[:60],
-                why=str(row.get("why") or "").strip()[:160],
-                source=index,
-                # Taken from the finding, never asked of the model.
-                source_url=findings[index - 1].url if index else None,
-            )
+            ComparisonBasis(label=label[:60], why=str(row.get("why") or "").strip()[:160])
         )
-    # One option is not a choice; it is the answer. Two is the smallest choice.
-    return bases[:4] if len(bases) > 1 else []
+    # One option is not a choice; it is the answer.
+    return bases[:MAX_COMPARISON_BASES] if len(bases) > 1 else []
 
 
 def extract_markets(
@@ -1651,16 +1683,16 @@ _BASIS_ALREADY_GIVEN = re.compile(
 )
 
 
-def _bases_worth_offering(
-    findings: List[WebFinding], prompt: str, *, seeds, settings
-) -> List[ComparisonBasis]:
+def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBasis]:
     """Offer a choice of basis only when the operator did not already make it.
 
-    Three conditions, and all of them have to hold. The turn has to be a
-    comparison, or there is nothing to define. The operator must not have said
-    what similar means, because asking then is just not listening. And the
-    sources have to actually divide — an option nobody wrote down is one we
-    invented, and inventing it is the thing being avoided.
+    Three conditions, all of which have to hold. There must be seeds, or
+    nothing is being compared. The operator must not have already said what
+    similar means: "rank them by engagement rate" says it outright, and asking
+    then is not listening. And the proposal must come back with a real choice.
+
+    Every way this returns [] leaves the caller searching exactly as it did
+    before any of this existed, which is what makes it safe to try first.
     """
     if not seeds:
         return []
@@ -1668,8 +1700,8 @@ def _bases_worth_offering(
         logger.info("web grounding: the operator named the basis — not offering a choice")
         return []
     try:
-        return extract_comparison_bases(
-            findings, prompt,
+        bases = propose_comparison_bases(
+            prompt, seeds,
             openai_key=settings.openai_api_key,
             model=settings.grounding_model,
             timeout=settings.search_timeout,
@@ -1677,6 +1709,13 @@ def _bases_worth_offering(
     except Exception as exc:  # never break the turn over an optional extra
         logger.warning("web grounding: comparison bases failed: %s", exc)
         return []
+    # Logged every time: "no options appeared" has several causes and they are
+    # indistinguishable from the outside.
+    logger.info(
+        "web grounding: comparison bases for %s -> %s",
+        list(seeds), [b.label for b in bases] or "none (asking nothing, searching instead)",
+    )
+    return bases
 
 
 def _drop_the_seeds(
@@ -2127,7 +2166,6 @@ def _research_via_engine(
     creators = _only_the_subjects(creators, subjects)
     # ...and never answer "who is like X" with X.
     creators = _drop_the_seeds(creators, seeds)
-    bases = _bases_worth_offering(findings, prompt, seeds=seeds, settings=settings)
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
         history=history, settings=settings,
@@ -2255,6 +2293,35 @@ def gather_web_context(
         subjects = []
         if seeds:
             logger.info("web grounding: %r are seeds, not the answer — searching for others", seeds)
+
+    # Ask what "similar" means BEFORE spending the search, not after.
+    #
+    # The earlier order read the options out of the results, so that an option
+    # nobody wrote down could not be invented. That bar is right for a fact and
+    # wrong for a question: a basis of comparison is a way of framing what the
+    # operator wants, not a claim about the world. Measured twice on the same
+    # query, twelve pages about comedians produced no options at all — a thread
+    # saying "if you like Bill Burr try Tom Segura" names people without ever
+    # saying why — so the choice the operator needed never appeared.
+    #
+    # It also cost two searches: one to build the menu, another once a basis
+    # was picked, with the first set of results thrown away.
+    #
+    # Nothing here can make the turn worse. Every failure returns no options,
+    # and no options means the search runs exactly as it did before.
+    if seeds:
+        bases = _bases_worth_offering(prompt, seeds=seeds, settings=settings)
+        if bases:
+            return WebContext(
+                action="ask",
+                question=(
+                    "Similar in which way? Pick one and I will search for it — "
+                    "or say what you would rather compare on."
+                ),
+                missing=["basis"],
+                comparison_bases=bases,
+                triage_ms=triage_ms,
+            )
     # The router's self-contained topic, falling back to the operator's own
     # words. The fallback is not a degraded path — for a question that already
     # stands alone the two are the same string, and verbatim is what we want.

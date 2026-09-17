@@ -156,9 +156,16 @@ def generate_research_plan(
                 plan=None,
                 clarifying_question=web.question,
                 understood_so_far=(
-                    "I can search the web for this, but I need one more detail first."
+                    # A comparison is not missing a detail, it is ambiguous:
+                    # the operator gave a complete request whose answer depends
+                    # on a choice only they can make.
+                    "Similar can mean different things here, and each one gives "
+                    "a different list."
+                    if web.comparison_bases
+                    else "I can search the web for this, but I need one more detail first."
                 ),
                 missing_fields=web.missing,
+                comparison_bases=web.comparison_bases,
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 

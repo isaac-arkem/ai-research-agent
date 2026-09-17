@@ -2277,63 +2277,97 @@ def test_a_seed_is_never_its_own_lookalike():
 # ── choosing what "similar" means ────────────────────────────────────
 
 
-def _pages(n=3):
-    from app.models.domain import WebFinding
-    return [WebFinding(title=f"T{i}", url=f"https://x{i}.com", snippet="",
-                       content="body " * 60) for i in range(1, n + 1)]
-
-
 def test_the_basis_is_offered_only_when_the_operator_did_not_give_one():
     """"rank them by engagement rate" already says what similar means. Asking
-    which basis to use would be asking a question they answered — the exact
-    thing this path exists to stop."""
+    then is not listening."""
     from app.services.grounding import _bases_worth_offering
 
     assert _bases_worth_offering(
-        _pages(), "creators similar to @sarkodie, rank them by engagement rate",
+        "creators similar to @sarkodie, rank them by engagement rate",
         seeds=["sarkodie"], settings=_settings()) == []
 
-    # ...and it is not offered when nothing was being compared.
+    # ...and nothing is offered when nothing is being compared.
     assert _bases_worth_offering(
-        _pages(), "top ghanaian musicians", seeds=[], settings=_settings()) == []
+        "top ghanaian musicians", seeds=[], settings=_settings()) == []
 
 
 def test_one_basis_is_not_a_choice():
-    """A single option is the answer, not a question. Showing it as a choice
-    asks the operator to pick from a list of one."""
+    """A single option is the answer, not a question."""
     from app.models.domain import ComparisonBasis
-    from app.services.grounding import extract_comparison_bases
+    from app.services.grounding import propose_comparison_bases
 
-    one = '{"bases": [{"label": "same music style", "why": "w", "source": 1}]}'
+    one = '{"bases": [{"label": "same music style", "why": "w"}]}'
     with patch("app.services.grounding.OpenAI", return_value=_triage(one)):
-        assert extract_comparison_bases(_pages(), "similar to @x", openai_key="sk") == []
+        assert propose_comparison_bases("similar to @x", ["x"], openai_key="sk") == []
 
-    two = ('{"bases": [{"label": "same music style", "why": "w", "source": 1},'
-           ' {"label": "similar level of reach", "why": "w", "source": 2}]}')
+    two = ('{"bases": [{"label": "same music style", "why": "w"},'
+           ' {"label": "similar level of fame", "why": "w"}]}')
     with patch("app.services.grounding.OpenAI", return_value=_triage(two)):
-        out = extract_comparison_bases(_pages(), "similar to @x", openai_key="sk")
-    assert [b.label for b in out] == ["same music style", "similar level of reach"]
+        out = propose_comparison_bases("similar to @x", ["x"], openai_key="sk")
+    assert [b.label for b in out] == ["same music style", "similar level of fame"]
     assert isinstance(out[0], ComparisonBasis)
 
 
-def test_a_basis_cites_a_real_page_and_never_invents_a_url():
-    """The URL comes from the finding at the model's index, never from the
-    model — the rule that keeps market citations honest, applied here."""
-    from app.services.grounding import extract_comparison_bases
+def test_unrecognised_accounts_offer_nothing_and_the_search_just_runs():
+    """Guessing what two strangers have in common produces options that sound
+    plausible and mean nothing. Empty is handled: the caller searches exactly
+    as it did before any of this existed."""
+    from app.services.grounding import propose_comparison_bases
 
-    payload = ('{"bases": [{"label": "same audience", "why": "w", "source": 2},'
-               ' {"label": "same era", "why": "w", "source": 99},'
-               ' {"label": "made up", "why": "w", "source": "not-an-int"}]}')
-    with patch("app.services.grounding.OpenAI", return_value=_triage(payload)):
-        out = extract_comparison_bases(_pages(3), "similar to @x", openai_key="sk")
+    with patch("app.services.grounding.OpenAI", return_value=_triage('{"bases": []}')):
+        assert propose_comparison_bases("similar to @nobody", ["nobody"], openai_key="sk") == []
 
-    assert out[0].source_url == "https://x2.com"      # index resolved to the page
-    assert out[1].source is None and out[1].source_url is None   # out of range
-    assert out[2].source is None and out[2].source_url is None   # not an integer
+    # No seeds at all is not a comparison.
+    assert propose_comparison_bases("top musicians", [], openai_key="sk") == []
 
 
-def test_extraction_failure_costs_the_options_not_the_turn():
-    from app.services.grounding import extract_comparison_bases
+def test_a_failed_proposal_costs_the_options_not_the_turn():
+    from app.services.grounding import propose_comparison_bases
 
     with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")):
-        assert extract_comparison_bases(_pages(), "similar to @x", openai_key="sk") == []
+        assert propose_comparison_bases("similar to @x", ["x"], openai_key="sk") == []
+
+
+def test_the_options_actually_reach_the_caller():
+    """The options were once computed and then dropped on the floor: `bases`
+    was built and never passed into the WebContext. Every test passed, because
+    every test checked the extractor rather than the wire."""
+    import inspect
+    from app.services import agent, grounding
+
+    asked = inspect.getsource(grounding.gather_web_context)
+    assert "_bases_worth_offering(" in asked, "options are still proposed"
+    assert "comparison_bases=bases" in asked, "and they must reach the WebContext"
+
+    # ...and off the context onto the result the caller returns.
+    branch = inspect.getsource(agent.generate_research_plan)
+    assert "comparison_bases=web.comparison_bases" in branch
+
+    from app.models.domain import ComparisonBasis
+    ctx = grounding.WebContext(
+        action="ask", comparison_bases=[ComparisonBasis(label="same music style")]
+    )
+    assert [b.label for b in ctx.comparison_bases] == ["same music style"]
+
+
+def test_asking_the_basis_spends_no_search():
+    """The whole point of asking first: the question costs one small model
+    call, and the provider is never constructed."""
+    from app.models.domain import ComparisonBasis
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')):
+        with patch("app.services.grounding._bases_worth_offering",
+                   return_value=[ComparisonBasis(label="same music style"),
+                                 ComparisonBasis(label="similar level of fame")]):
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context(
+                    "creators similar to @sarkodie and @shattawale",
+                    _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+    assert [b.label for b in web.comparison_bases] == [
+        "same music style", "similar level of fame"
+    ]

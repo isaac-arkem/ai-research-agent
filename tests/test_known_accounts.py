@@ -4,6 +4,7 @@ from app.services.known_accounts import (
     extract_handles,
     handles_needing_platform,
     accounts_are_references,
+    continues_named_account_job,
     lookup_known_accounts,
     names_accounts,
     platform_clarifying_question,
@@ -191,3 +192,59 @@ def test_would_like_is_not_a_comparison():
     """"like" carries the comparison, but not in "would like to"."""
     assert not accounts_are_references("I would like to scrape @isaac")
     assert names_accounts("I would like to scrape @isaac")
+
+
+def test_picking_an_option_does_not_restart_a_named_account_job():
+    """"same audience" — the whole of a reply that picks how to compare —
+    names nobody. The handles it inherits come from the question two turns
+    back, so read on its own it looked like a bare answer inside a
+    named-account job: the platform question fired, grounding was skipped,
+    and picking an option ENDED the search instead of refining it."""
+    from app.models.domain import ChatTurn
+
+    after_comparison = [
+        ChatTurn(role="user",
+                 content="Find creators similar to @kevinhart4real and @billburr"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"which basis?","missing_fields":[]}'),
+    ]
+    for pick in ("same audience", "same storytelling style", "similar level of fame",
+                 "something i typed myself"):
+        assert handles_needing_platform(pick, after_comparison) == [], pick
+
+    # A message carrying its OWN handles is still judged on its own merits, so
+    # a real job later in the same thread still asks which platform.
+    still_asked = handles_needing_platform("scrape @isaac and @dave", after_comparison)
+    assert "isaac" in still_asked and "dave" in still_asked
+
+    # Separately, and not changed here: that list also carries the seeds from
+    # the earlier comparison, because handles are gathered across every user
+    # turn in the thread. Asking which platform @kevinhart4real is on, in a
+    # job about @isaac, is wrong — but it is wrong the same way it was before
+    # any of this, and fixing it is a change to how a job inherits handles.
+    assert "kevinhart4real" in still_asked
+
+
+def test_a_basis_question_is_not_a_question_about_accounts():
+    """Asking what "similar" means is a question about the SEARCH. Its reply —
+    "same level of fame" — names nobody, so it read as a bare field answer
+    inside a named-account job: the operator picked how to compare and was
+    asked which platform to scrape."""
+    import json
+    from app.models.domain import ChatTurn
+
+    def thread(missing):
+        return [
+            ChatTurn(role="user",
+                     content="Find creators similar to @kevinhart4real and @billburr"),
+            ChatTurn(role="assistant", content=json.dumps(
+                {"clarifying_question": "q", "missing_fields": missing})),
+        ]
+
+    assert not continues_named_account_job("same level of fame", thread(["basis"]))
+
+    # Questions that ARE about the accounts still hold the job open.
+    assert continues_named_account_job("tech_giants", thread(["niche"]))
+    assert continues_named_account_job("instagram", thread(["platform"]))
+    # A mixed question is still about the accounts.
+    assert continues_named_account_job("instagram", thread(["basis", "platform"]))

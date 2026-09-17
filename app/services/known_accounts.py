@@ -274,6 +274,10 @@ def _content_of(turn) -> str:
     return str(content or "")
 
 
+# Fields whose question has nothing to do with which accounts to scrape.
+_NOT_ABOUT_ACCOUNTS = {"basis"}
+
+
 def _pending_question(turn) -> bool:
     """Was this assistant turn a question still waiting on an answer?
 
@@ -288,7 +292,15 @@ def _pending_question(turn) -> bool:
         missing = json.loads(content).get("missing_fields")
     except ValueError:
         return False
-    return isinstance(missing, list) and len(missing) > 0
+    if not isinstance(missing, list) or not missing:
+        return False
+    # Not every pending question is about the accounts. Asking what "similar"
+    # means is a question about the SEARCH, and the reply to it — "same level
+    # of fame" — names nobody, so it read as a bare field answer inside a
+    # named-account job and the turn was routed to the planner: the operator
+    # picked how to compare and was asked which platform to scrape.
+    fields = {str(m).strip().lower() for m in missing}
+    return bool(fields - _NOT_ABOUT_ACCOUNTS)
 
 
 def continues_named_account_job(
@@ -385,6 +397,18 @@ def handles_needing_platform(
         # it. Asking for it here stalls the search behind an irrelevant field.
         return []
     texts = _user_texts(prompt, history)
+    # The handles are often not in THIS message. "same audience" — the whole
+    # of a reply that picks how to compare — names nobody, and the handles it
+    # inherits come from the question two turns back. Read on its own it looks
+    # like a bare answer inside a named-account job, so the platform question
+    # fired and grounding was skipped: picking an option ended the search
+    # instead of refining it.
+    #
+    # So when this message names nobody, the turn that DID name them decides.
+    # A message carrying its own handles is still judged on its own merits,
+    # which keeps "scrape @a and @b" later in the same thread a real job.
+    if not extract_handles(prompt) and any(accounts_are_references(t) for t in texts):
+        return []
     named = extract_handles(*texts)
     known_h = {account.handle.lower() for account in (known or [])}
     unknown = [handle for handle in named if handle not in known_h]
