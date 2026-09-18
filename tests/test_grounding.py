@@ -2362,7 +2362,7 @@ def test_asking_the_basis_spends_no_search():
                                  ComparisonBasis(label="similar level of fame")]):
             with patch("app.services.grounding.provider_from_settings") as provider:
                 web = gather_web_context(
-                    "creators similar to @sarkodie and @shattawale",
+                    "creators similar to @sarkodie and @shattawale on TikTok",
                     _ctx(), settings=_settings())
 
     provider.assert_not_called()
@@ -2461,3 +2461,76 @@ def test_a_comparison_escalates_even_though_it_carries_at_handles():
         triage_search("scrape @demibagby and @antonielokhorst", _ctx(),
                       openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o")
     assert _models_asked(client) == ["gpt-4o-mini"]
+
+
+def test_a_comparison_asks_which_platform_before_which_basis():
+    """With no platform named, paid_lane_allowed blocks Instagram and TikTok,
+    so "creators similar to @sarkodie" can only come back as names read off
+    web pages — 20 sources, one creator, no handle. The platform decides
+    which lane opens at all, so it is asked first.
+
+    This is NOT the question that used to stall a comparison. That one asked
+    which platform @sarkodie is on, in order to scrape HIM."""
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding.provider_from_settings") as provider:
+            web = gather_web_context("Find creators similar to @sarkodie",
+                                     _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "ask"
+    assert web.missing == ["platform"]
+    assert "TikTok or Instagram" in (web.question or "")
+
+
+def test_the_platform_is_asked_once_not_every_turn():
+    """A platform named anywhere earlier in the thread settles it — otherwise
+    picking a basis would land straight back on the platform question."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to @sarkodie on TikTok"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"which basis?","missing_fields":["basis"]}'),
+    ]
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding._bases_worth_offering", return_value=[]):
+            with patch("app.services.grounding.provider_from_settings"):
+                web = gather_web_context("same music style", _ctx(), history,
+                                         settings=_settings())
+
+    # Past the platform question — it does not ask again.
+    assert web.missing != ["platform"]
+
+
+def test_the_seeds_survive_the_platform_answer():
+    """"instagram" — the whole of a reply naming the platform — carries no
+    handles and no comparison word. Read on its own there were no seeds, so
+    the basis question was skipped and the operator answered one question
+    while the next never arrived."""
+    from app.models.domain import ChatTurn, ComparisonBasis
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to @sarkodie"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"Which platform?",'
+                         '"missing_fields":["platform"]}'),
+    ]
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding._bases_worth_offering",
+                   return_value=[ComparisonBasis(label="same music style"),
+                                 ComparisonBasis(label="similar size of following")]) as bases:
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context("instagram", _ctx(), history,
+                                         settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+    assert [b.label for b in web.comparison_bases] == [
+        "same music style", "similar size of following"
+    ]
+    # The seed came off the thread, not off the word "instagram".
+    assert bases.call_args.kwargs["seeds"] == ["Sarkodie"]

@@ -57,6 +57,7 @@ from app.models.domain import (
 from app.services.known_accounts import (
     accounts_are_references,
     extract_handles,
+    operator_named_platform,
 )
 from app.services.prompt import UNRESEARCHABLE
 from app.services.search import (
@@ -1803,6 +1804,19 @@ _BASIS_ALREADY_GIVEN = re.compile(
 )
 
 
+def _role_of_turn(turn) -> Optional[str]:
+    return getattr(turn, "role", None) or (
+        turn.get("role") if isinstance(turn, dict) else None
+    )
+
+
+def _content_of_turn(turn) -> str:
+    content = getattr(turn, "content", None) or (
+        turn.get("content") if isinstance(turn, dict) else None
+    )
+    return str(content or "")
+
+
 def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBasis]:
     """Offer a choice of basis only when the operator did not already make it.
 
@@ -2436,7 +2450,16 @@ def gather_web_context(
     # paid-lane gate, so the lookalike search runs without the social lanes
     # that carry handles and follower counts.
     seeds: List[str] = []
-    if accounts_are_references(prompt):
+    # The comparison is often not in THIS message. "instagram" — the whole of
+    # a reply naming the platform — carries no handles and no comparison word,
+    # so seeds came back empty and the basis question was skipped entirely:
+    # the operator answered one question and the next one never arrived.
+    _earlier = [
+        _content_of_turn(t) for t in (history or []) if _role_of_turn(t) == "user"
+    ]
+    if accounts_are_references(prompt) or any(
+        accounts_are_references(t) for t in _earlier
+    ):
         seen_seed = set()
         seeds = []
         for name in list(subjects) + extract_handles(prompt):
@@ -2464,6 +2487,37 @@ def gather_web_context(
     # Nothing here can make the turn worse. Every failure returns no options,
     # and no options means the search runs exactly as it did before.
     if seeds:
+        # Which platform, before which basis.
+        #
+        # Nothing here is being scraped yet, so this is NOT the question that
+        # used to stall a comparison ("which platform is @sarkodie on?", asked
+        # in order to scrape him). It is the one that decides which lane opens
+        # at all: with no platform named, paid_lane_allowed blocks Instagram
+        # and TikTok, and "creators similar to @sarkodie" can only come back
+        # as names off web pages — 20 sources, one creator, no handle.
+        #
+        # Asked once per thread. Any platform word in any earlier message of
+        # the conversation settles it, or picking a basis would land straight
+        # back here.
+        said_platform = operator_named_platform(
+            prompt, *[
+                _content_of_turn(t) for t in (history or [])
+                if _role_of_turn(t) == "user"
+            ]
+        )
+        if not said_platform:
+            logger.info("web grounding: comparison with no platform — asking which lane")
+            return WebContext(
+                action="ask",
+                question=(
+                    "Which platform should I look on — TikTok or Instagram? "
+                    "Without one I can only read web pages, which name people "
+                    "but rarely give their accounts."
+                ),
+                missing=["platform"],
+                triage_ms=triage_ms,
+            )
+
         bases = _bases_worth_offering(prompt, seeds=seeds, settings=settings)
         if bases:
             return WebContext(
