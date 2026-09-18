@@ -1920,6 +1920,28 @@ def _content_of_turn(turn) -> str:
     return str(content or "")
 
 
+def _basis_already_asked(history) -> bool:
+    """Did we already put the basis question to them?
+
+    Without this it is asked forever. The reply that picks one — "similar
+    level of fame" — carries no basis word the guard recognises, so the
+    question was proposed again, with the resolution line repeated above it,
+    every turn. The operator answered and got the same question back.
+    """
+    for turn in reversed(list(history or [])):
+        if _role_of_turn(turn) != "assistant":
+            continue
+        content = _content_of_turn(turn)
+        if "missing_fields" not in content:
+            return False
+        try:
+            fields = json.loads(content).get("missing_fields") or []
+        except ValueError:
+            return False
+        return "basis" in {str(f).strip().lower() for f in fields}
+    return False
+
+
 def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBasis]:
     """Offer a choice of basis only when the operator did not already make it.
 
@@ -2589,7 +2611,16 @@ def gather_web_context(
     #
     # Nothing here can make the turn worse. Every failure returns no options,
     # and no options means the search runs exactly as it did before.
-    if seeds:
+    # Asked once. A reply that picks a basis is an ANSWER, not a new
+    # comparison — and it is also acceptance of the account we named, so
+    # neither question is put again. Without this the basis was proposed
+    # forever: "similar level of fame" contains no basis word the guard
+    # recognises, so the same question came back with the same resolution
+    # line above it, every turn.
+    #
+    # A new handle reopens it. "no, @thisone" has changed the subject, and
+    # the basis for a different person is a different question.
+    if seeds and (not _basis_already_asked(history) or extract_handles(prompt)):
         # Which platform, before which basis.
         #
         # Nothing here is being scraped yet, so this is NOT the question that

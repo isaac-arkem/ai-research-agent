@@ -24,6 +24,7 @@ import pytest
 
 from app.models.domain import AgentContext, Creator, MarketEntry, WebFinding
 from app.services.grounding import (
+    _basis_already_asked,
     MAX_CONTENT_CHARS,
     summarise_findings,
     REVIEW_QUESTION,
@@ -2595,3 +2596,57 @@ def test_a_search_failure_leaves_the_name_unresolved():
     with patch("app.services.grounding.provider_from_settings",
                side_effect=RuntimeError("boom")):
         assert resolve_seed("Sarkodie", settings=_settings()) is None
+
+
+def test_the_basis_is_asked_once_not_after_every_answer():
+    """Picking one came straight back as the same question with the same
+    resolution line above it. "similar level of fame" carries no basis word
+    the guard recognises, so a new set of options was proposed — forever.
+
+    Picking a basis is also acceptance of the account that was named, so the
+    resolution is not restated and the name is not re-resolved."""
+    import json as _json
+    from app.models.domain import ChatTurn, ComparisonBasis
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to Sarkodie"),
+        ChatTurn(role="assistant", content=_json.dumps({
+            "understood_so_far": "Taking Sarkodie to be @sarkodie.official on TikTok.",
+            "clarifying_question": "Similar in which way?",
+            "missing_fields": ["basis"],
+        })),
+    ]
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding._bases_worth_offering",
+                   return_value=[ComparisonBasis(label="x"),
+                                 ComparisonBasis(label="y")]) as bases:
+            with patch("app.services.grounding.resolve_seed") as resolver:
+                with patch("app.services.grounding.provider_from_settings"):
+                    with patch("app.services.grounding._research_via_engine",
+                               return_value=None):
+                        web = gather_web_context("similar level of fame", _ctx(),
+                                                 history, settings=_settings())
+
+    assert not bases.called, "the basis must not be proposed twice"
+    assert not resolver.called, "and the name must not be resolved twice"
+    assert web.action != "ask"
+
+
+def test_a_new_handle_reopens_the_basis():
+    """"no, @blacksherif" changes the subject, and the basis for a different
+    person is a different question."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to Sarkodie"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"Similar in which way?",'
+                         '"missing_fields":["basis"]}'),
+    ]
+    assert _basis_already_asked(history)
+    # The guard the caller applies: already asked, UNLESS a handle arrives.
+    from app.services.known_accounts import extract_handles
+
+    assert extract_handles("no, @blacksherif")
+    assert not extract_handles("similar level of fame")
