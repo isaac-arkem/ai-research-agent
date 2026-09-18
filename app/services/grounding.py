@@ -1234,6 +1234,17 @@ WHEN THE SEEDS DISAGREE, SAY SO IN THE OPTIONS. Sarkodie raps and Shatta Wale do
 
 "why" is one short line saying what choosing it would GET them — the difference it makes, not a restatement of the label.
 
+MOST OF A REQUEST IS CONSTRAINTS, AND A CONSTRAINT IS NOT A BASIS.
+
+"exclude celebrities", "nobody over a million followers", "in Ghana", "on Instagram" all bound WHO COUNTS as an answer. None of them says what makes two creators alike. A request stuffed with constraints and no basis still needs the question asked — those need it most, because the operator has been precise about everything except the one thing you are asking.
+
+RETURN AN EMPTY LIST ONLY WHEN THE BASIS ITSELF WAS NAMED — the quality being matched on. It reads as "by X", "in terms of X", "ranked by X", "similar in X":
+
+  "rank them by engagement rate"                     -> []   the basis is engagement
+  "similar in style to @x"                           -> []   the basis is style
+  "similar to @x, exclude anyone over 1M followers"  -> OPTIONS, a follower cap is a filter
+  "similar to @x in Ghana on Instagram"              -> OPTIONS, both are filters
+
 Two to five options. IF YOU DO NOT RECOGNISE THE ACCOUNTS, RETURN AN EMPTY LIST. Guessing at what two strangers have in common produces options that sound plausible and mean nothing, and an empty list is handled: the search simply runs without asking."""
 
 
@@ -1793,17 +1804,6 @@ def _is_a_subject(creator: Creator, subjects: Sequence[str]) -> bool:
     return False
 
 
-# Words that already say what "similar" means. "rank them by engagement rate"
-# names the basis, so asking which basis to use would be asking a question the
-# operator has answered — the thing this whole path exists to avoid.
-_BASIS_ALREADY_GIVEN = re.compile(
-    r"\b(?:engagement|followers?|follower\s+count|reach|audience\s+size|"
-    r"genre|style|sound|niche|language|location|country|region|age|"
-    r"posting\s+frequency|views?|streams?)\b",
-    re.IGNORECASE,
-)
-
-
 # A profile URL on either platform we can actually search.
 _PROFILE_URL_RE = re.compile(
     r"https?://(?:www\.)?(instagram|tiktok)\.com/@?([A-Za-z0-9._]{2,30})/?",
@@ -1954,9 +1954,6 @@ def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBas
     before any of this existed, which is what makes it safe to try first.
     """
     if not seeds:
-        return []
-    if _BASIS_ALREADY_GIVEN.search(prompt or ""):
-        logger.info("web grounding: the operator named the basis — not offering a choice")
         return []
     try:
         bases = propose_comparison_bases(
@@ -2669,7 +2666,13 @@ def gather_web_context(
                 triage_ms=triage_ms,
             )
 
-        bases = _bases_worth_offering(prompt, seeds=seeds, settings=settings)
+        # The router's standalone topic, not the message in hand. On the turn
+        # that answers the platform question the message is the single word
+        # "instagram", and the proposer was asked what "similar" could mean
+        # given that — it returned nothing, so no options were offered and the
+        # search ran unasked. The topic carries the whole request.
+        standalone = (routed.get("topic") or "").strip() or prompt
+        bases = _bases_worth_offering(standalone, seeds=seeds, settings=settings)
         if bases:
             # State the resolution, do not ask it. Genuine ambiguity is rare —
             # searching a name returns the prominent one and little else — so

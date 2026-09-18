@@ -2650,3 +2650,32 @@ def test_a_new_handle_reopens_the_basis():
 
     assert extract_handles("no, @blacksherif")
     assert not extract_handles("similar level of fame")
+
+
+def test_the_options_are_proposed_from_the_whole_request_not_the_last_word():
+    """On the turn that answers the platform question the message is the
+    single word "instagram". Asked what "similar" could mean given that, the
+    proposer returned nothing, no options were offered, and the search ran
+    unasked. The router's standalone topic carries the whole request."""
+    import inspect
+    from app.services import grounding
+
+    src = inspect.getsource(grounding.gather_web_context)
+    assert 'standalone = (routed.get("topic") or "").strip() or prompt' in src
+    assert "_bases_worth_offering(standalone" in src
+
+
+def test_a_constraint_is_not_a_basis():
+    """"exclude celebrities and accounts over one million followers" bounds
+    WHO COUNTS as an answer; it does not say what makes someone similar. A
+    word list cannot tell those apart — it matched "followers" and suppressed
+    the question on the request that needed it most."""
+    from app.services.grounding import COMPARISON_BASIS_SYSTEM
+
+    assert "A CONSTRAINT IS NOT A BASIS" in COMPARISON_BASIS_SYSTEM
+    assert "RETURN AN EMPTY LIST ONLY WHEN THE BASIS ITSELF WAS NAMED" in COMPARISON_BASIS_SYSTEM
+    # The word list it replaced is gone, not merely unused: it matched
+    # "followers" inside "accounts over one million followers".
+    from app.services import grounding
+
+    assert not hasattr(grounding, "_BASIS_ALREADY_GIVEN")
