@@ -327,6 +327,24 @@ def continues_named_account_job(
     if not turns or _role_of(turns[-1]) != "assistant":
         return False
 
+    # A comparison thread is not a named-account job, however many @handles it
+    # carries: the accounts are what "similar" is measured against.
+    #
+    # Without this, answering the comparison's own question re-opened the
+    # bypass. "Which platform should I look on?" is stored with
+    # missing_fields ["platform"], which reads as a question ABOUT the
+    # accounts — so "Instagram" was taken as a field answer inside a scrape
+    # job, grounding was skipped, and the planner built a plan with no country
+    # and failed validation. The basis question hit the same trap and was
+    # excluded by name; naming each new field one at a time is not a rule, so
+    # this states the actual one.
+    if any(
+        accounts_are_references(_content_of(t))
+        for t in turns
+        if _role_of(t) == "user"
+    ):
+        return False
+
     for turn in reversed(turns):
         if _role_of(turn) == "assistant":
             if not _pending_question(turn):

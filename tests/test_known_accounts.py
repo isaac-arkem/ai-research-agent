@@ -243,11 +243,21 @@ def test_a_basis_question_is_not_a_question_about_accounts():
 
     assert not continues_named_account_job("same level of fame", thread(["basis"]))
 
-    # Questions that ARE about the accounts still hold the job open.
-    assert continues_named_account_job("tech_giants", thread(["niche"]))
-    assert continues_named_account_job("instagram", thread(["platform"]))
-    # A mixed question is still about the accounts.
-    assert continues_named_account_job("instagram", thread(["basis", "platform"]))
+    # ...and neither is the platform question a comparison asks. It is stored
+    # with the same missing_fields as the scrape job's, so excluding fields by
+    # name never held: what settles it is that the THREAD is a comparison.
+    assert not continues_named_account_job("Instagram", thread(["platform"]))
+
+    # A real named-account job still holds open across its own questions.
+    def job(missing):
+        return [
+            ChatTurn(role="user", content="scrape @isaac and @marco on tiktok"),
+            ChatTurn(role="assistant", content=json.dumps(
+                {"clarifying_question": "q", "missing_fields": missing})),
+        ]
+
+    assert continues_named_account_job("tech_giants", job(["niche"]))
+    assert continues_named_account_job("instagram", job(["platform"]))
 
 
 def test_an_account_given_as_a_reference_is_not_the_job():
