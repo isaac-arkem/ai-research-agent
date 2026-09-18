@@ -1804,6 +1804,109 @@ _BASIS_ALREADY_GIVEN = re.compile(
 )
 
 
+# A profile URL on either platform we can actually search.
+_PROFILE_URL_RE = re.compile(
+    r"https?://(?:www\.)?(instagram|tiktok)\.com/@?([A-Za-z0-9._]{2,30})/?",
+    re.IGNORECASE,
+)
+# Paths that look like a handle but are not one.
+_NOT_A_PROFILE = {
+    "p", "reel", "reels", "explore", "stories", "tv", "accounts", "popular",
+    "about", "legal", "privacy", "directory", "tag", "music", "video", "live",
+    "discover", "search", "foryou", "upload", "login", "help",
+}
+
+
+# .title() gives "Tiktok", which nobody writes.
+_PLATFORM_LABEL = {"tiktok": "TikTok", "instagram": "Instagram"}
+
+
+@dataclass
+class ResolvedSeed:
+    """A bare name, resolved to an account we can name back to the operator."""
+
+    name: str
+    handle: str
+    platform: str
+    url: str
+
+
+def resolve_seed(
+    name: str, *, settings, timeout: Optional[float] = None
+) -> Optional[ResolvedSeed]:
+    """Turn a bare name into a real account, or return None.
+
+    "@sarkodie" is an exact account. "Sarkodie" is a guess — it is a common
+    Ghanaian surname, and taking it to mean the rapper is an assumption we
+    were making silently. One search on the name settles it, and settles two
+    other things with it: WHICH platform they are on, so the platform question
+    does not have to be asked, and who we took them to be, so the operator can
+    correct us in one message.
+
+    What this is NOT is a way to get better search results. Tavily resolves
+    "Sarkodie" perfectly well on its own, and the social lanes search hashtags
+    rather than the seed's profile. The value is the platform and the honesty.
+
+    None on anything less than a confident match — an unresolvable name falls
+    back to asking which platform, which is what happened before this existed.
+    """
+    label = (name or "").strip().lstrip("@")
+    if not label:
+        return None
+    try:
+        provider = provider_from_settings(settings)
+        results = provider.search(SearchQuery(
+            text=f"{label} official Instagram TikTok account",
+            limit=8,
+            timeout=timeout or getattr(settings, "search_timeout", 15.0),
+        ))
+    except Exception as exc:
+        logger.warning("web grounding: seed resolution failed for %r: %s", label, exc)
+        return None
+
+    want = _norm_subject(label)
+    tokens = [_norm_subject(t) for t in label.split() if _norm_subject(t)]
+
+    def _made(platform: str, slug: str, how: str) -> ResolvedSeed:
+        logger.info("web grounding: %r resolves to @%s on %s (%s)",
+                    label, slug, platform, how)
+        return ResolvedSeed(
+            name=label, handle=slug, platform=platform,
+            url=(f"https://www.tiktok.com/@{slug}" if platform == "tiktok"
+                 else f"https://www.instagram.com/{slug}/"),
+        )
+
+    candidates = []
+    for result in results or []:
+        title = getattr(result, "title", "") or ""
+        for platform, handle in _PROFILE_URL_RE.findall(getattr(result, "url", "") or ""):
+            slug = handle.strip().lower()
+            if slug not in _NOT_A_PROFILE:
+                candidates.append((platform.lower(), slug, title))
+
+    # First pass: the handle IS the name, give or take a suffix an official
+    # account actually uses. Strict, because a loose match here names the
+    # WRONG person back to the operator with total confidence.
+    for platform, slug, _title in candidates:
+        got = _norm_subject(slug)
+        if got == want or (
+            got.startswith(want) and got[len(want):] in _OFFICIAL_SUFFIXES
+        ):
+            return _made(platform, slug, "handle matches the name")
+
+    # There was a second pass that read the page TITLE — an official profile
+    # is titled "Kevin Hart (@kevinhart4real) - Instagram photos and videos",
+    # which carries both name and handle. It was removed after measurement:
+    # it resolved Kevin Hart to @imkevinhart, Bill Burr to @wilfredburr and
+    # Shatta Wale to @shattawaleking. Every one of those is confidently wrong,
+    # and naming the wrong person back to the operator is worse than saying we
+    # could not work it out — an unresolved name asks which platform, which is
+    # what happened before any of this existed.
+
+    logger.info("web grounding: %r did not resolve to an account", label)
+    return None
+
+
 def _role_of_turn(turn) -> Optional[str]:
     return getattr(turn, "role", None) or (
         turn.get("role") if isinstance(turn, dict) else None
@@ -2499,7 +2602,24 @@ def gather_web_context(
         # Asked once per thread. Any platform word in any earlier message of
         # the conversation settles it, or picking a basis would land straight
         # back here.
-        said_platform = operator_named_platform(
+        # A bare name is a guess. "@sarkodie" is an exact account; "Sarkodie"
+        # is a common Ghanaian surname, and taking it to mean the rapper was
+        # an assumption made silently. One search settles it — and settles
+        # WHICH PLATFORM with it, so the question below never has to be asked.
+        #
+        # Only for bare names: a message carrying @handles has already said
+        # exactly who it means, and re-resolving it would be asking a settled
+        # question.
+        # Across the whole thread, not just this message. The handles are
+        # usually in the FIRST turn — "creators similar to @sarkodie" — while
+        # the message in hand is a bare "instagram". Checking only this one
+        # would re-resolve a name the operator had already pinned exactly, and
+        # spend a search to answer a settled question.
+        resolved = None
+        if seeds and not extract_handles(prompt, *_earlier):
+            resolved = resolve_seed(seeds[0], settings=settings)
+
+        said_platform = bool(resolved) or operator_named_platform(
             prompt, *[
                 _content_of_turn(t) for t in (history or [])
                 if _role_of_turn(t) == "user"
@@ -2520,6 +2640,19 @@ def gather_web_context(
 
         bases = _bases_worth_offering(prompt, seeds=seeds, settings=settings)
         if bases:
+            # State the resolution, do not ask it. Genuine ambiguity is rare —
+            # searching a name returns the prominent one and little else — so
+            # a "which one did you mean?" question would nearly always offer a
+            # single real answer. Naming who we took them to be is just as
+            # honest and costs no turn, and the operator corrects it in one
+            # message if we are wrong.
+            said = None
+            if resolved:
+                said = (
+                    f"Taking {resolved.name} to be @{resolved.handle} on "
+                    f"{_PLATFORM_LABEL.get(resolved.platform, resolved.platform)}. "
+                    "Not who you meant? Give me their handle."
+                )
             return WebContext(
                 action="ask",
                 question=(
@@ -2528,6 +2661,7 @@ def gather_web_context(
                 ),
                 missing=["basis"],
                 comparison_bases=bases,
+                prose=said,
                 triage_ms=triage_ms,
             )
     # The router's self-contained topic, falling back to the operator's own

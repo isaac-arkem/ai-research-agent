@@ -2534,3 +2534,64 @@ def test_the_seeds_survive_the_platform_answer():
     ]
     # The seed came off the thread, not off the word "instagram".
     assert bases.call_args.kwargs["seeds"] == ["Sarkodie"]
+
+
+# ── resolving a bare name ────────────────────────────────────────────
+
+
+def _hits(*pairs):
+    return [SearchResult(url=u, title=t, description="", content="")
+            for u, t in pairs]
+
+
+def test_a_bare_name_resolves_to_an_account_and_settles_the_platform():
+    """"@sarkodie" is an exact account. "Sarkodie" is a guess — a common
+    Ghanaian surname — and taking it to mean the rapper was an assumption made
+    silently. Resolving it also says WHICH platform, so that question does not
+    have to be asked."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.instagram.com/p/Dxyz", "some post"),
+        ("https://www.instagram.com/sarkodie?hl=en", "Sarkodie • Instagram"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        seed = resolve_seed("Sarkodie", settings=_settings())
+
+    assert seed is not None
+    assert seed.handle == "sarkodie" and seed.platform == "instagram"
+
+
+def test_a_name_that_does_not_match_the_handle_stays_unresolved():
+    """Measured, a looser rule resolved Kevin Hart to @imkevinhart, Bill Burr
+    to @wilfredburr and Shatta Wale to @shattawaleking. Naming the wrong
+    person back with confidence is worse than admitting we could not work it
+    out — unresolved just asks which platform, as it did before."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@imkevinhart?lang=en", "TikTok - Make Your Day"),
+        ("https://www.instagram.com/kevinhartfans/", "Kevin Hart Fans"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        assert resolve_seed("Kevin Hart", settings=_settings()) is None
+
+
+def test_posts_and_reels_are_not_accounts():
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.instagram.com/p/Dxyz", "x"),
+        ("https://www.instagram.com/reel/Dabc", "x"),
+        ("https://www.instagram.com/explore/", "x"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        assert resolve_seed("Sarkodie", settings=_settings()) is None
+
+
+def test_a_search_failure_leaves_the_name_unresolved():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               side_effect=RuntimeError("boom")):
+        assert resolve_seed("Sarkodie", settings=_settings()) is None

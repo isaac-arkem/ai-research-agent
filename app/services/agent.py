@@ -155,14 +155,22 @@ def generate_research_plan(
                 ok=True,
                 plan=None,
                 clarifying_question=web.question,
+                # When a bare name was resolved, say who we took it to be
+                # before anything else — it is the assumption most worth
+                # correcting, and it is ours, not theirs.
+                #
+                # Otherwise: a comparison is not missing a detail, it is
+                # ambiguous. The operator gave a complete request whose answer
+                # depends on a choice only they can make.
                 understood_so_far=(
-                    # A comparison is not missing a detail, it is ambiguous:
-                    # the operator gave a complete request whose answer depends
-                    # on a choice only they can make.
-                    "Similar can mean different things here, and each one gives "
-                    "a different list."
-                    if web.comparison_bases
-                    else "I can search the web for this, but I need one more detail first."
+                    web.prose
+                    or (
+                        "Similar can mean different things here, and each one "
+                        "gives a different list."
+                        if web.comparison_bases
+                        else "I can search the web for this, but I need one "
+                             "more detail first."
+                    )
                 ),
                 missing_fields=web.missing,
                 comparison_bases=web.comparison_bases,
