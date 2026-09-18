@@ -248,3 +248,25 @@ def test_a_basis_question_is_not_a_question_about_accounts():
     assert continues_named_account_job("instagram", thread(["platform"]))
     # A mixed question is still about the accounts.
     assert continues_named_account_job("instagram", thread(["basis", "platform"]))
+
+
+def test_an_account_given_as_a_reference_is_not_the_job():
+    """"Use @demibagby and @antonielokhorst on TikTok as references to find
+    similar fitness creators in Brazil" hands over two real accounts and asks
+    for OTHER people. It was read as a settled scrape job and went straight to
+    a plan for those two — and the escalation that would have caught it bailed
+    out precisely because an "@" was present."""
+    ref = ("Use @demibagby and @antonielokhorst on TikTok as references "
+           "to find similar fitness creators in Brazil.")
+    assert accounts_are_references(ref)
+    assert not names_accounts(ref)
+    assert handles_needing_platform(ref, []) == []
+
+    for phrasing in ("find creators like @demibagby",
+                     "use @demibagby as a reference to find similar creators",
+                     "@demibagby and @antonielokhorst as examples, who else?"):
+        assert accounts_are_references(phrasing), phrasing
+        assert not names_accounts(phrasing), phrasing
+
+    # The same accounts, actually named as the job.
+    assert names_accounts("scrape @demibagby and @antonielokhorst")

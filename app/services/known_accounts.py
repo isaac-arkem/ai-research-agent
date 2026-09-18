@@ -350,6 +350,9 @@ def continues_named_account_job(
 _COMPARISON_RE = re.compile(
     r"\b(?:similar|similarly|similar\s+to|lookalikes?|look-alikes?|"
     r"comparable|compares?|comparison|competitors?|alternatives?|"
+    # An account offered AS a reference, example, benchmark or yardstick is
+    # the thing "similar" is measured against — never the thing to scrape.
+    r"references?|examples?|benchmarks?|yardsticks?|"
     r"resembl\w+|in\s+the\s+style\s+of|same\s+(?:style|vibe|kind|sort)\s+as)\b"
     r"|(?<!would )(?<!should )(?<!'d )\blike\b(?!\s+to\b)",
     re.IGNORECASE,

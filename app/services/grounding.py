@@ -240,6 +240,15 @@ A pronoun still points at a person. "his", "her", "their", "his handles" carry t
 
 Only an @handle or a profile URL ends a search. A platform, a person's name, and a pronoun standing in for one are all things you search WITH.
 
+AN ACCOUNT GIVEN AS A REFERENCE IS A SEED, NOT THE JOB. "Use @demibagby and @antonielokhorst on TikTok as references to find similar fitness creators in Brazil" hands you two real accounts — and asks for OTHER people. The accounts are what "similar" is measured against; they are not what gets scraped. That is a "search", answer "creators", with both handles as subjects.
+
+  "scrape @demibagby and @antonielokhorst"                    -> skip   (they ARE the job)
+  "find creators like @demibagby and @antonielokhorst"        -> search (they are the yardstick)
+  "use @demibagby as a reference to find similar creators"    -> search
+  "@demibagby and @antonielokhorst as examples, who else?"    -> search
+
+The words that turn an account into a reference: similar, like, reference, example, yardstick, benchmark, comparable, in the style of, more of. When one is present, the "@" settles nothing.
+
 THIS HOLDS FOR ANY NUMBER OF NAMES. "give me Sarkodie and Stonebwoy's handles" names two PEOPLE and no accounts — still a "search", answer "creators". What settles a job is the @, not the "and": "@isaac and @dave" is settled and "Isaac and Dave" is a search for two people.
 
 "subjects" IS THE PEOPLE THE QUESTION IS ABOUT BY NAME, and it is [] almost always.
@@ -398,8 +407,15 @@ def triage_search(
     reason = str(routed.get("reason") or "").lower()
     if not any(word in reason for word in _NAMED_ACCOUNT_REASON):
         return routed
-    if "@" in prompt or "instagram.com/" in prompt or "tiktok.com/" in prompt:
+    if not accounts_are_references(prompt) and (
+        "@" in prompt or "instagram.com/" in prompt or "tiktok.com/" in prompt
+    ):
         return routed  # accounts really are named; the small model was right
+    # A comparison is the one place an "@" does NOT settle the job. "Use
+    # @demibagby and @antonielokhorst as references to find similar fitness
+    # creators in Brazil" names two accounts and asks for OTHER people, and
+    # the small model called it settled — so the guard that trusts an "@" was
+    # blocking the escalation exactly where it was needed.
 
     logger.info(
         "web grounding: %s skipped for %r with no account named — re-asking %s",
@@ -2421,7 +2437,13 @@ def gather_web_context(
     # that carry handles and follower counts.
     seeds: List[str] = []
     if accounts_are_references(prompt):
-        seeds = subjects + [h for h in extract_handles(prompt) if h not in subjects]
+        seen_seed = set()
+        seeds = []
+        for name in list(subjects) + extract_handles(prompt):
+            key = name.lstrip("@").strip().casefold()
+            if key and key not in seen_seed:
+                seen_seed.add(key)
+                seeds.append(name.lstrip("@").strip())
         subjects = []
         if seeds:
             logger.info("web grounding: %r are seeds, not the answer — searching for others", seeds)
