@@ -2679,3 +2679,75 @@ def test_a_constraint_is_not_a_basis():
     from app.services import grounding
 
     assert not hasattr(grounding, "_BASIS_ALREADY_GIVEN")
+
+
+# ── the operator's size limit ────────────────────────────────────────
+
+
+def test_a_follower_limit_is_read_from_the_request():
+    from app.services.grounding import follower_limit
+
+    assert follower_limit(
+        "Find creators similar to @stonebwoy, but exclude celebrities and "
+        "accounts over one million followers."
+    ) == (None, 1_000_000)
+    assert follower_limit("creators under 100k followers") == (None, 100_000)
+    assert follower_limit("at least 10k followers") == (10_000, None)
+    assert follower_limit("creators similar to @stonebwoy") is None
+
+
+def test_a_follower_count_is_only_read_from_a_number_that_says_what_it_is():
+    """"comments 253 likes 10,123" is a post's engagement, not an audience.
+    Read as one, a creator gets dropped for being too small when nothing is
+    known about their size."""
+    from app.models.domain import Creator
+    from app.services.grounding import follower_count
+
+    assert follower_count(Creator(name="x", why="5.4M Followers")) == 5_400_000
+    assert follower_count(Creator(name="x", why="4.8M")) == 4_800_000
+    assert follower_count(Creator(name="x", why="86.8k followers")) == 86_800
+    assert follower_count(
+        Creator(name="x", why="2,100,000 followers on tiktok")) == 2_100_000
+    assert follower_count(Creator(name="x", why="comments 253 likes 10,123")) is None
+    assert follower_count(Creator(name="x", why="")) is None
+
+
+def test_the_limit_drops_who_it_should_and_keeps_the_unknown():
+    """The answer came back led by Sarkodie at 5.4M and Shatta Wale at 4.8M,
+    on a request that excluded exactly them. Unknown size is KEPT: a page that
+    never said how big someone is, is not evidence that they are too big."""
+    from app.models.domain import Creator
+    from app.services.grounding import _within_follower_limit
+
+    found = [
+        Creator(name="trilhamenosemais", why="comments 253 likes 10,123"),
+        Creator(name="Kaesa", why="Ghanaian influencer with 86.8k followers"),
+        Creator(name="Sarkodie", why="5.4M Followers"),
+        Creator(name="Shatta Wale", why="4.8M"),
+    ]
+    kept = _within_follower_limit(found, (None, 1_000_000))
+    assert [c.name for c in kept] == ["trilhamenosemais", "Kaesa"]
+
+    # No limit changes nothing at all.
+    assert _within_follower_limit(found, None) == found
+    # A floor works the other way.
+    assert [c.name for c in _within_follower_limit(found, (1_000_000, None))] == [
+        "trilhamenosemais", "Sarkodie", "Shatta Wale"
+    ]
+
+
+def test_the_limit_is_read_from_the_thread_not_the_last_message():
+    """It is set in the first message and the turn in hand is "same country
+    and scene"."""
+    import inspect
+    from app.services import grounding
+
+    src = inspect.getsource(grounding._research_via_engine)
+    assert "_within_follower_limit(" in src
+    assert "for t in (history or [])" in src
+
+
+def test_the_router_keeps_the_limit_in_the_topic():
+    from app.services.grounding import TRIAGE_SYSTEM
+
+    assert "CARRY THE OPERATOR'S LIMITS INTO THE TOPIC" in TRIAGE_SYSTEM

@@ -189,6 +189,17 @@ DROP A DESCRIPTOR THAT HAS STOPPED DISCRIMINATING. When a market has been chosen
 
 Keep a descriptor that still narrows the field inside the market — a niche ("modest fashion", "cooking"), a format ("skits"), a language, an age group. Drop one that describes the market itself.
 
+CARRY THE OPERATOR'S LIMITS INTO THE TOPIC. A constraint they set — "exclude celebrities", "nobody over a million followers", "not the big names", "under 100k" — holds for the whole thread, not just the turn it was typed on. Dropping it from the rewrite sends a search that asks for the opposite of what they said.
+
+  before: "creators similar to @stonebwoy, but exclude celebrities and
+           accounts over one million followers"
+  now:    "same country and scene"
+  topic:  "creators similar to Stonebwoy from Ghana on Instagram, excluding
+           celebrities and accounts over one million followers"
+          NOT "creators similar to @stonebwoy from Ghana on Instagram" —
+          that search returns Sarkodie at 5.4M first, which is precisely
+          who they excluded.
+
 A message that opens a NEW subject is not a narrowing, however much it looks like a follow-up. "Find modest fashion creators in Saudi Arabia" after a thread about Ghana is its own topic; carry nothing.
 
 "answer" SAYS WHAT THE QUESTION IS ASKING FOR. It decides what the operator is shown, so read the question, not the topic.
@@ -1974,6 +1985,112 @@ def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBas
     return bases
 
 
+_WORD_NUMBERS = {
+    "a": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "ten": 10, "fifty": 50, "hundred": 100,
+}
+_SCALE = {"k": 1_000, "thousand": 1_000, "m": 1_000_000, "million": 1_000_000}
+
+# A number with an optional scale: "1M", "100k", "one million", "2,100,000".
+_AMOUNT = (
+    r"(?:(?P<digits>\d[\d,.]*)|(?P<word>a|one|two|three|four|five|ten|fifty|hundred))"
+    r"\s*(?P<scale>k|m|thousand|million)?"
+)
+# "exclude ... over 1M followers", "under 100k", "at least 10k".
+_LIMIT_RE = re.compile(
+    r"(?P<sense>exclude|excluding|without|no|not|under|below|fewer\s+than|less\s+than|"
+    r"up\s+to|at\s+most|no\s+more\s+than|over|above|more\s+than|at\s+least|minimum)"
+    r"[^.;]{0,40}?" + _AMOUNT + r"\s*(?:\+)?\s*(?:followers?|fans|subs\w*)",
+    re.IGNORECASE,
+)
+_UPPER_SENSE = {
+    "exclude", "excluding", "without", "no", "not", "under", "below",
+    "fewer than", "less than", "up to", "at most", "no more than",
+}
+# A follower count in a creator's "why": "5.4M Followers", "86.8k followers",
+# "2,100,000 followers on tiktok", or a bare "4.8M" when that is all it says.
+_COUNT_NEAR_WORD = re.compile(_AMOUNT + r"\s*\+?\s*(?:followers?|fans)", re.IGNORECASE)
+_COUNT_BARE = re.compile(r"^\s*" + _AMOUNT + r"\s*\+?\s*$", re.IGNORECASE)
+
+
+def _amount(match) -> Optional[int]:
+    raw = match.group("digits")
+    if raw:
+        try:
+            value = float(raw.replace(",", ""))
+        except ValueError:
+            return None
+    else:
+        value = _WORD_NUMBERS.get((match.group("word") or "").lower())
+        if value is None:
+            return None
+    scale = (match.group("scale") or "").lower()
+    return int(value * _SCALE.get(scale, 1))
+
+
+def follower_limit(text: str) -> Optional[tuple]:
+    """(minimum, maximum) followers the operator asked for, or None.
+
+    "exclude celebrities and accounts over one million followers" is a real
+    instruction and it was ignored — the answer came back led by Sarkodie at
+    5.4M, Shatta Wale at 4.8M and two more over three million.
+    """
+    match = _LIMIT_RE.search(text or "")
+    if not match:
+        return None
+    value = _amount(match)
+    if value is None:
+        return None
+    sense = re.sub(r"\s+", " ", match.group("sense").lower())
+    # "exclude ... over 1M" and "under 1M" both cap it. Only a bare "over" or
+    # "at least" sets a floor.
+    if sense in _UPPER_SENSE or "exclude" in sense or "no " in sense:
+        return (None, value)
+    return (value, None)
+
+
+def follower_count(creator) -> Optional[int]:
+    """How many followers a creator's own text claims, or None.
+
+    Only from a number that says what it is. "comments 253 likes 10,123" is a
+    post's engagement, not an audience, and reading it as one would drop a
+    creator for being too small when nothing is known about their size.
+    """
+    why = (getattr(creator, "why", "") or "").strip()
+    for pattern in (_COUNT_NEAR_WORD, _COUNT_BARE):
+        match = pattern.search(why)
+        if match:
+            return _amount(match)
+    return None
+
+
+def _within_follower_limit(creators: List[Creator], limit) -> List[Creator]:
+    """Drop the ones the operator excluded by size.
+
+    Unknown size is KEPT. A creator whose page never said how big they are is
+    not evidence that they are too big, and dropping them would quietly answer
+    a question nobody could answer.
+    """
+    if not limit:
+        return creators
+    low, high = limit
+    kept, dropped = [], []
+    for creator in creators:
+        size = follower_count(creator)
+        if size is None:
+            kept.append(creator)
+        elif (high is not None and size > high) or (low is not None and size < low):
+            dropped.append(creator)
+        else:
+            kept.append(creator)
+    if dropped:
+        logger.info(
+            "web grounding: dropped %d creator(s) outside the follower limit %s: %s",
+            len(dropped), limit, [c.name for c in dropped][:6],
+        )
+    return kept
+
+
 def _drop_the_seeds(
     creators: List[Creator], seeds: Optional[Sequence[str]]
 ) -> List[Creator]:
@@ -2422,6 +2539,19 @@ def _research_via_engine(
     creators = _only_the_subjects(creators, subjects)
     # ...and never answer "who is like X" with X.
     creators = _drop_the_seeds(creators, seeds)
+    # The size limit is in the FIRST message — "exclude celebrities and
+    # accounts over one million followers" — while the message in hand is
+    # "same country and scene". Read from the thread, or the constraint is
+    # obeyed on turn one and forgotten on every turn after it.
+    creators = _within_follower_limit(
+        creators,
+        follower_limit(
+            " ".join([prompt] + [
+                _content_of_turn(t) for t in (history or [])
+                if _role_of_turn(t) == "user"
+            ])
+        ),
+    )
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
         history=history, settings=settings,
