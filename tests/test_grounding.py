@@ -2435,3 +2435,29 @@ def test_the_router_is_taught_when_not_to_search():
     assert "OPERATION ON THE LIST ALREADY SHOWN" in TRIAGE_SYSTEM
     # ...and when it still must.
     assert 'NEW PEOPLE, NEW PLACES OR NEW NUMBERS ARE A "search"' in TRIAGE_SYSTEM
+
+
+def test_a_comparison_escalates_even_though_it_carries_at_handles():
+    """The gates were fixed for this shape and the ROUTER was not, so it came
+    back. "Use @demibagby and @antonielokhorst as references to find similar
+    fitness creators in Brazil" passed every code gate, reached the router,
+    and was skipped as a settled job — while the escalation built to catch
+    that refused to fire because the message contains an "@".
+
+    A turn has two independent deciders. Testing one of them is how a fix
+    passes its own tests and changes nothing the operator sees."""
+    ref = ("Use @demibagby and @antonielokhorst on TikTok as references "
+           "to find similar fitness creators in Brazil.")
+    client = _triage('{"action":"skip","reason":"named accounts are provided"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(ref, _ctx(), openai_key="sk",
+                      model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini", "gpt-4o"]
+
+    # The same handles named as the job must NOT escalate — an "@" still
+    # settles it everywhere except a comparison.
+    client = _triage('{"action":"skip","reason":"named accounts are provided"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search("scrape @demibagby and @antonielokhorst", _ctx(),
+                      openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini"]
