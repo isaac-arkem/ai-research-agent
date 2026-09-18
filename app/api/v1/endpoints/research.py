@@ -121,6 +121,14 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
                 stored["hashtags"] = [h.model_dump() for h in (result.hashtags or [])]
                 stored["markets"] = [m.model_dump() for m in (result.markets or [])]
                 stored["searched_for"] = result.searched_for
+            if result.comparison_bases:
+                # Outside the findings block on purpose: the turn that offers
+                # these has NOT searched — asking what "similar" means is what
+                # it does instead of searching. Stored in there, the options
+                # vanished the moment the operator reopened the thread.
+                stored["comparison_bases"] = [
+                    b.model_dump() for b in result.comparison_bases
+                ]
             cq_json = json.dumps(stored, ensure_ascii=False)
             return conversation_service.store.add_assistant_message(
                 cid,
@@ -171,6 +179,7 @@ def _success_body(result: AgentResult, cid: str, message_id: Optional[str]) -> A
         creators=result.creators,
         hashtags=result.hashtags,
         markets=result.markets,
+        comparison_bases=result.comparison_bases,
         searched_for=result.searched_for,
         awaiting_approval=result.awaiting_approval,
     )

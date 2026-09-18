@@ -24,6 +24,7 @@ import pytest
 
 from app.models.domain import AgentContext, Creator, MarketEntry, WebFinding
 from app.services.grounding import (
+    _basis_already_asked,
     MAX_CONTENT_CHARS,
     summarise_findings,
     REVIEW_QUESTION,
@@ -2253,3 +2254,500 @@ def test_several_named_people_are_all_kept():
     ]
     kept = _only_the_subjects(found, ["Sarkodie", "Stonebwoy"])
     assert [c.name for c in kept] == ["Sarkodie", "Stonebwoy"]
+
+
+def test_a_seed_is_never_its_own_lookalike():
+    """Every page about creators like Sarkodie is a page about Sarkodie, so he
+    is the name most likely to come back — and the one name that cannot be
+    part of the answer."""
+    from app.models.domain import Creator
+    from app.services.grounding import _drop_the_seeds
+
+    found = [
+        Creator(name="Sarkodie", handle="sarkodie", platform="tiktok", why="seed"),
+        Creator(name="Shatta Wale", handle="shattawale", platform="tiktok", why="seed"),
+        Creator(name="Medikal", handle="amgmedikal", platform="tiktok", why="rap peer"),
+        Creator(name="Samini", handle="samini", platform="tiktok", why="dancehall"),
+    ]
+    kept = _drop_the_seeds(found, ["sarkodie", "shattawale"])
+    assert [c.name for c in kept] == ["Medikal", "Samini"]
+    # No seeds is the ordinary case and must change nothing.
+    assert _drop_the_seeds(found, []) == found
+
+
+# ── choosing what "similar" means ────────────────────────────────────
+
+
+def test_the_basis_is_offered_only_when_the_operator_did_not_give_one():
+    """"rank them by engagement rate" already says what similar means. Asking
+    then is not listening."""
+    from app.services.grounding import _bases_worth_offering
+
+    assert _bases_worth_offering(
+        "creators similar to @sarkodie, rank them by engagement rate",
+        seeds=["sarkodie"], settings=_settings()) == []
+
+    # ...and nothing is offered when nothing is being compared.
+    assert _bases_worth_offering(
+        "top ghanaian musicians", seeds=[], settings=_settings()) == []
+
+
+def test_one_basis_is_not_a_choice():
+    """A single option is the answer, not a question."""
+    from app.models.domain import ComparisonBasis
+    from app.services.grounding import propose_comparison_bases
+
+    one = '{"bases": [{"label": "same music style", "why": "w"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(one)):
+        assert propose_comparison_bases("similar to @x", ["x"], openai_key="sk") == []
+
+    two = ('{"bases": [{"label": "same music style", "why": "w"},'
+           ' {"label": "similar level of fame", "why": "w"}]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(two)):
+        out = propose_comparison_bases("similar to @x", ["x"], openai_key="sk")
+    assert [b.label for b in out] == ["same music style", "similar level of fame"]
+    assert isinstance(out[0], ComparisonBasis)
+
+
+def test_unrecognised_accounts_offer_nothing_and_the_search_just_runs():
+    """Guessing what two strangers have in common produces options that sound
+    plausible and mean nothing. Empty is handled: the caller searches exactly
+    as it did before any of this existed."""
+    from app.services.grounding import propose_comparison_bases
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage('{"bases": []}')):
+        assert propose_comparison_bases("similar to @nobody", ["nobody"], openai_key="sk") == []
+
+    # No seeds at all is not a comparison.
+    assert propose_comparison_bases("top musicians", [], openai_key="sk") == []
+
+
+def test_a_failed_proposal_costs_the_options_not_the_turn():
+    from app.services.grounding import propose_comparison_bases
+
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")):
+        assert propose_comparison_bases("similar to @x", ["x"], openai_key="sk") == []
+
+
+def test_the_options_actually_reach_the_caller():
+    """The options were once computed and then dropped on the floor: `bases`
+    was built and never passed into the WebContext. Every test passed, because
+    every test checked the extractor rather than the wire."""
+    import inspect
+    from app.services import agent, grounding
+
+    asked = inspect.getsource(grounding.gather_web_context)
+    assert "_bases_worth_offering(" in asked, "options are still proposed"
+    assert "comparison_bases=bases" in asked, "and they must reach the WebContext"
+
+    # ...and off the context onto the result the caller returns.
+    branch = inspect.getsource(agent.generate_research_plan)
+    assert "comparison_bases=web.comparison_bases" in branch
+
+    from app.models.domain import ComparisonBasis
+    ctx = grounding.WebContext(
+        action="ask", comparison_bases=[ComparisonBasis(label="same music style")]
+    )
+    assert [b.label for b in ctx.comparison_bases] == ["same music style"]
+
+
+def test_asking_the_basis_spends_no_search():
+    """The whole point of asking first: the question costs one small model
+    call, and the provider is never constructed."""
+    from app.models.domain import ComparisonBasis
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')):
+        with patch("app.services.grounding._bases_worth_offering",
+                   return_value=[ComparisonBasis(label="same music style"),
+                                 ComparisonBasis(label="similar level of fame")]):
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context(
+                    "creators similar to @sarkodie and @shattawale on TikTok",
+                    _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+    assert [b.label for b in web.comparison_bases] == [
+        "same music style", "similar level of fame"
+    ]
+
+
+# ── answering without searching ──────────────────────────────────────
+
+
+def test_a_respond_turn_spends_no_search():
+    """"among these, which are from Armenia?" is an operation on a list already
+    on screen. With nowhere to put it, the router searched — the topic went out
+    as "Armenia comedians from the previous list" and came back with 45
+    creators, five MORE than the list the operator asked to narrow."""
+    client = _triage('{"action":"respond","reason":"operates on the list shown"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding.respond_from_thread",
+                   return_value=("Nothing here records location.", "Search instead?")):
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context("among these, which are from Armenia?",
+                                         _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "respond"
+    assert web.prose == "Nothing here records location."
+    assert web.next_step == "Search instead?"
+    assert web.provider == "thread"
+
+
+def test_a_respond_that_cannot_answer_falls_back_to_the_planner():
+    """The worst case of adding this action is the behaviour without it."""
+    client = _triage('{"action":"respond","reason":"x"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding.respond_from_thread",
+                   return_value=(None, None)):
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context("sort them", _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "skip"
+
+
+def test_respond_needs_a_conversation_to_work_from():
+    """A question about "these" with nothing behind it is not answerable here."""
+    from app.services.grounding import respond_from_thread
+
+    assert respond_from_thread("sort these", None, openai_key="sk") == (None, None)
+    assert respond_from_thread("sort these", [], openai_key="sk") == (None, None)
+
+
+def test_a_respond_answer_reaches_the_caller():
+    """The third wiring fault of this shape: computed, then dropped."""
+    import inspect
+    from app.services import agent
+
+    src = inspect.getsource(agent.generate_research_plan)
+    assert 'web.action == "respond"' in src
+    assert "understood_so_far=web.prose" in src
+
+
+def test_the_router_is_taught_when_not_to_search():
+    from app.services.grounding import ACTIONS, TRIAGE_SYSTEM
+
+    assert "respond" in ACTIONS
+    assert 'THE QUESTION IS NOT "COULD THIS BE RESEARCHED"' in TRIAGE_SYSTEM
+    assert "OPERATION ON THE LIST ALREADY SHOWN" in TRIAGE_SYSTEM
+    # ...and when it still must.
+    assert 'NEW PEOPLE, NEW PLACES OR NEW NUMBERS ARE A "search"' in TRIAGE_SYSTEM
+
+
+def test_a_comparison_escalates_even_though_it_carries_at_handles():
+    """The gates were fixed for this shape and the ROUTER was not, so it came
+    back. "Use @demibagby and @antonielokhorst as references to find similar
+    fitness creators in Brazil" passed every code gate, reached the router,
+    and was skipped as a settled job — while the escalation built to catch
+    that refused to fire because the message contains an "@".
+
+    A turn has two independent deciders. Testing one of them is how a fix
+    passes its own tests and changes nothing the operator sees."""
+    ref = ("Use @demibagby and @antonielokhorst on TikTok as references "
+           "to find similar fitness creators in Brazil.")
+    client = _triage('{"action":"skip","reason":"named accounts are provided"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(ref, _ctx(), openai_key="sk",
+                      model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini", "gpt-4o"]
+
+    # The same handles named as the job must NOT escalate — an "@" still
+    # settles it everywhere except a comparison.
+    client = _triage('{"action":"skip","reason":"named accounts are provided"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search("scrape @demibagby and @antonielokhorst", _ctx(),
+                      openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o")
+    assert _models_asked(client) == ["gpt-4o-mini"]
+
+
+def test_a_comparison_asks_which_platform_before_which_basis():
+    """With no platform named, paid_lane_allowed blocks Instagram and TikTok,
+    so "creators similar to @sarkodie" can only come back as names read off
+    web pages — 20 sources, one creator, no handle. The platform decides
+    which lane opens at all, so it is asked first.
+
+    This is NOT the question that used to stall a comparison. That one asked
+    which platform @sarkodie is on, in order to scrape HIM."""
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding.provider_from_settings") as provider:
+            web = gather_web_context("Find creators similar to @sarkodie",
+                                     _ctx(), settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "ask"
+    assert web.missing == ["platform"]
+    assert "TikTok or Instagram" in (web.question or "")
+
+
+def test_the_platform_is_asked_once_not_every_turn():
+    """A platform named anywhere earlier in the thread settles it — otherwise
+    picking a basis would land straight back on the platform question."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to @sarkodie on TikTok"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"which basis?","missing_fields":["basis"]}'),
+    ]
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding._bases_worth_offering", return_value=[]):
+            with patch("app.services.grounding.provider_from_settings"):
+                web = gather_web_context("same music style", _ctx(), history,
+                                         settings=_settings())
+
+    # Past the platform question — it does not ask again.
+    assert web.missing != ["platform"]
+
+
+def test_the_seeds_survive_the_platform_answer():
+    """"instagram" — the whole of a reply naming the platform — carries no
+    handles and no comparison word. Read on its own there were no seeds, so
+    the basis question was skipped and the operator answered one question
+    while the next never arrived."""
+    from app.models.domain import ChatTurn, ComparisonBasis
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to @sarkodie"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"Which platform?",'
+                         '"missing_fields":["platform"]}'),
+    ]
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding._bases_worth_offering",
+                   return_value=[ComparisonBasis(label="same music style"),
+                                 ComparisonBasis(label="similar size of following")]) as bases:
+            with patch("app.services.grounding.provider_from_settings") as provider:
+                web = gather_web_context("instagram", _ctx(), history,
+                                         settings=_settings())
+
+    provider.assert_not_called()
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+    assert [b.label for b in web.comparison_bases] == [
+        "same music style", "similar size of following"
+    ]
+    # The seed came off the thread, not off the word "instagram".
+    assert bases.call_args.kwargs["seeds"] == ["Sarkodie"]
+
+
+# ── resolving a bare name ────────────────────────────────────────────
+
+
+def _hits(*pairs):
+    return [SearchResult(url=u, title=t, description="", content="")
+            for u, t in pairs]
+
+
+def test_a_bare_name_resolves_to_an_account_and_settles_the_platform():
+    """"@sarkodie" is an exact account. "Sarkodie" is a guess — a common
+    Ghanaian surname — and taking it to mean the rapper was an assumption made
+    silently. Resolving it also says WHICH platform, so that question does not
+    have to be asked."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.instagram.com/p/Dxyz", "some post"),
+        ("https://www.instagram.com/sarkodie?hl=en", "Sarkodie • Instagram"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        seed = resolve_seed("Sarkodie", settings=_settings())
+
+    assert seed is not None
+    assert seed.handle == "sarkodie" and seed.platform == "instagram"
+
+
+def test_a_name_that_does_not_match_the_handle_stays_unresolved():
+    """Measured, a looser rule resolved Kevin Hart to @imkevinhart, Bill Burr
+    to @wilfredburr and Shatta Wale to @shattawaleking. Naming the wrong
+    person back with confidence is worse than admitting we could not work it
+    out — unresolved just asks which platform, as it did before."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@imkevinhart?lang=en", "TikTok - Make Your Day"),
+        ("https://www.instagram.com/kevinhartfans/", "Kevin Hart Fans"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        assert resolve_seed("Kevin Hart", settings=_settings()) is None
+
+
+def test_posts_and_reels_are_not_accounts():
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.instagram.com/p/Dxyz", "x"),
+        ("https://www.instagram.com/reel/Dabc", "x"),
+        ("https://www.instagram.com/explore/", "x"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        assert resolve_seed("Sarkodie", settings=_settings()) is None
+
+
+def test_a_search_failure_leaves_the_name_unresolved():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               side_effect=RuntimeError("boom")):
+        assert resolve_seed("Sarkodie", settings=_settings()) is None
+
+
+def test_the_basis_is_asked_once_not_after_every_answer():
+    """Picking one came straight back as the same question with the same
+    resolution line above it. "similar level of fame" carries no basis word
+    the guard recognises, so a new set of options was proposed — forever.
+
+    Picking a basis is also acceptance of the account that was named, so the
+    resolution is not restated and the name is not re-resolved."""
+    import json as _json
+    from app.models.domain import ChatTurn, ComparisonBasis
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to Sarkodie"),
+        ChatTurn(role="assistant", content=_json.dumps({
+            "understood_so_far": "Taking Sarkodie to be @sarkodie.official on TikTok.",
+            "clarifying_question": "Similar in which way?",
+            "missing_fields": ["basis"],
+        })),
+    ]
+    client = _triage('{"action":"search","topic":"t","subjects":["Sarkodie"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        with patch("app.services.grounding._bases_worth_offering",
+                   return_value=[ComparisonBasis(label="x"),
+                                 ComparisonBasis(label="y")]) as bases:
+            with patch("app.services.grounding.resolve_seed") as resolver:
+                with patch("app.services.grounding.provider_from_settings"):
+                    with patch("app.services.grounding._research_via_engine",
+                               return_value=None):
+                        web = gather_web_context("similar level of fame", _ctx(),
+                                                 history, settings=_settings())
+
+    assert not bases.called, "the basis must not be proposed twice"
+    assert not resolver.called, "and the name must not be resolved twice"
+    assert web.action != "ask"
+
+
+def test_a_new_handle_reopens_the_basis():
+    """"no, @blacksherif" changes the subject, and the basis for a different
+    person is a different question."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="Find creators similar to Sarkodie"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"Similar in which way?",'
+                         '"missing_fields":["basis"]}'),
+    ]
+    assert _basis_already_asked(history)
+    # The guard the caller applies: already asked, UNLESS a handle arrives.
+    from app.services.known_accounts import extract_handles
+
+    assert extract_handles("no, @blacksherif")
+    assert not extract_handles("similar level of fame")
+
+
+def test_the_options_are_proposed_from_the_whole_request_not_the_last_word():
+    """On the turn that answers the platform question the message is the
+    single word "instagram". Asked what "similar" could mean given that, the
+    proposer returned nothing, no options were offered, and the search ran
+    unasked. The router's standalone topic carries the whole request."""
+    import inspect
+    from app.services import grounding
+
+    src = inspect.getsource(grounding.gather_web_context)
+    assert 'standalone = (routed.get("topic") or "").strip() or prompt' in src
+    assert "_bases_worth_offering(standalone" in src
+
+
+def test_a_constraint_is_not_a_basis():
+    """"exclude celebrities and accounts over one million followers" bounds
+    WHO COUNTS as an answer; it does not say what makes someone similar. A
+    word list cannot tell those apart — it matched "followers" and suppressed
+    the question on the request that needed it most."""
+    from app.services.grounding import COMPARISON_BASIS_SYSTEM
+
+    assert "A CONSTRAINT IS NOT A BASIS" in COMPARISON_BASIS_SYSTEM
+    assert "RETURN AN EMPTY LIST ONLY WHEN THE BASIS ITSELF WAS NAMED" in COMPARISON_BASIS_SYSTEM
+    # The word list it replaced is gone, not merely unused: it matched
+    # "followers" inside "accounts over one million followers".
+    from app.services import grounding
+
+    assert not hasattr(grounding, "_BASIS_ALREADY_GIVEN")
+
+
+# ── the operator's size limit ────────────────────────────────────────
+
+
+def test_a_follower_limit_is_read_from_the_request():
+    from app.services.grounding import follower_limit
+
+    assert follower_limit(
+        "Find creators similar to @stonebwoy, but exclude celebrities and "
+        "accounts over one million followers."
+    ) == (None, 1_000_000)
+    assert follower_limit("creators under 100k followers") == (None, 100_000)
+    assert follower_limit("at least 10k followers") == (10_000, None)
+    assert follower_limit("creators similar to @stonebwoy") is None
+
+
+def test_a_follower_count_is_only_read_from_a_number_that_says_what_it_is():
+    """"comments 253 likes 10,123" is a post's engagement, not an audience.
+    Read as one, a creator gets dropped for being too small when nothing is
+    known about their size."""
+    from app.models.domain import Creator
+    from app.services.grounding import follower_count
+
+    assert follower_count(Creator(name="x", why="5.4M Followers")) == 5_400_000
+    assert follower_count(Creator(name="x", why="4.8M")) == 4_800_000
+    assert follower_count(Creator(name="x", why="86.8k followers")) == 86_800
+    assert follower_count(
+        Creator(name="x", why="2,100,000 followers on tiktok")) == 2_100_000
+    assert follower_count(Creator(name="x", why="comments 253 likes 10,123")) is None
+    assert follower_count(Creator(name="x", why="")) is None
+
+
+def test_the_limit_drops_who_it_should_and_keeps_the_unknown():
+    """The answer came back led by Sarkodie at 5.4M and Shatta Wale at 4.8M,
+    on a request that excluded exactly them. Unknown size is KEPT: a page that
+    never said how big someone is, is not evidence that they are too big."""
+    from app.models.domain import Creator
+    from app.services.grounding import _within_follower_limit
+
+    found = [
+        Creator(name="trilhamenosemais", why="comments 253 likes 10,123"),
+        Creator(name="Kaesa", why="Ghanaian influencer with 86.8k followers"),
+        Creator(name="Sarkodie", why="5.4M Followers"),
+        Creator(name="Shatta Wale", why="4.8M"),
+    ]
+    kept = _within_follower_limit(found, (None, 1_000_000))
+    assert [c.name for c in kept] == ["trilhamenosemais", "Kaesa"]
+
+    # No limit changes nothing at all.
+    assert _within_follower_limit(found, None) == found
+    # A floor works the other way.
+    assert [c.name for c in _within_follower_limit(found, (1_000_000, None))] == [
+        "trilhamenosemais", "Sarkodie", "Shatta Wale"
+    ]
+
+
+def test_the_limit_is_read_from_the_thread_not_the_last_message():
+    """It is set in the first message and the turn in hand is "same country
+    and scene"."""
+    import inspect
+    from app.services import grounding
+
+    src = inspect.getsource(grounding._research_via_engine)
+    assert "_within_follower_limit(" in src
+    assert "for t in (history or [])" in src
+
+
+def test_the_router_keeps_the_limit_in_the_topic():
+    from app.services.grounding import TRIAGE_SYSTEM
+
+    assert "CARRY THE OPERATOR'S LIMITS INTO THE TOPIC" in TRIAGE_SYSTEM

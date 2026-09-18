@@ -274,6 +274,10 @@ def _content_of(turn) -> str:
     return str(content or "")
 
 
+# Fields whose question has nothing to do with which accounts to scrape.
+_NOT_ABOUT_ACCOUNTS = {"basis"}
+
+
 def _pending_question(turn) -> bool:
     """Was this assistant turn a question still waiting on an answer?
 
@@ -288,7 +292,15 @@ def _pending_question(turn) -> bool:
         missing = json.loads(content).get("missing_fields")
     except ValueError:
         return False
-    return isinstance(missing, list) and len(missing) > 0
+    if not isinstance(missing, list) or not missing:
+        return False
+    # Not every pending question is about the accounts. Asking what "similar"
+    # means is a question about the SEARCH, and the reply to it — "same level
+    # of fame" — names nobody, so it read as a bare field answer inside a
+    # named-account job and the turn was routed to the planner: the operator
+    # picked how to compare and was asked which platform to scrape.
+    fields = {str(m).strip().lower() for m in missing}
+    return bool(fields - _NOT_ABOUT_ACCOUNTS)
 
 
 def continues_named_account_job(
@@ -315,6 +327,24 @@ def continues_named_account_job(
     if not turns or _role_of(turns[-1]) != "assistant":
         return False
 
+    # A comparison thread is not a named-account job, however many @handles it
+    # carries: the accounts are what "similar" is measured against.
+    #
+    # Without this, answering the comparison's own question re-opened the
+    # bypass. "Which platform should I look on?" is stored with
+    # missing_fields ["platform"], which reads as a question ABOUT the
+    # accounts — so "Instagram" was taken as a field answer inside a scrape
+    # job, grounding was skipped, and the planner built a plan with no country
+    # and failed validation. The basis question hit the same trap and was
+    # excluded by name; naming each new field one at a time is not a rule, so
+    # this states the actual one.
+    if any(
+        accounts_are_references(_content_of(t))
+        for t in turns
+        if _role_of(t) == "user"
+    ):
+        return False
+
     for turn in reversed(turns):
         if _role_of(turn) == "assistant":
             if not _pending_question(turn):
@@ -323,6 +353,39 @@ def continues_named_account_job(
         if _role_of(turn) == "user" and extract_handles(_content_of(turn)):
             return True
     return False
+
+
+# A named account is not always the target. "scrape @sarkodie" asks for that
+# account; "creators similar to @sarkodie" asks for OTHER accounts, and names
+# him only to say what they should be like. The words below are what separates
+# the two, and getting it wrong is expensive in one direction: read as a target,
+# a comparison never reaches the search at all — it goes straight to a scrape
+# job for the two accounts the operator was comparing AGAINST.
+#
+# "like" is in here but cannot be matched bare: "I would like to scrape @isaac"
+# is not a comparison. It counts only where it is not preceded by would/should/'d
+# and not followed by "to".
+_COMPARISON_RE = re.compile(
+    r"\b(?:similar|similarly|similar\s+to|lookalikes?|look-alikes?|"
+    r"comparable|compares?|comparison|competitors?|alternatives?|"
+    # An account offered AS a reference, example, benchmark or yardstick is
+    # the thing "similar" is measured against — never the thing to scrape.
+    r"references?|examples?|benchmarks?|yardsticks?|"
+    r"resembl\w+|in\s+the\s+style\s+of|same\s+(?:style|vibe|kind|sort)\s+as)\b"
+    r"|(?<!would )(?<!should )(?<!'d )\blike\b(?!\s+to\b)",
+    re.IGNORECASE,
+)
+
+
+def accounts_are_references(text: str) -> bool:
+    """Does this message name accounts as a COMPARISON, not as the job?
+
+    When it does, the handles are inputs to a search — the seeds — and the
+    answer is other people entirely. Treating them as the job is what turned
+    "Find creators similar to @sarkodie and @shattawale, then rank them by
+    similarity and engagement rate" into a plan to scrape those two accounts.
+    """
+    return bool(text) and bool(_COMPARISON_RE.search(text))
 
 
 def names_accounts(prompt: str) -> bool:
@@ -338,6 +401,9 @@ def names_accounts(prompt: str) -> bool:
     So: an unambiguous, free check for the unambiguous case. Everything that
     depends on context is decided by triage, which has the history.
     """
+    if accounts_are_references(prompt):
+        # Seeds, not a job. Let the router read the sentence.
+        return False
     return bool(extract_handles(prompt))
 
 
@@ -347,7 +413,23 @@ def handles_needing_platform(
     known: Optional[Sequence[KnownAccount]] = None,
 ) -> List[str]:
     """Named handles with no catalog platform and no operator platform."""
+    if accounts_are_references(prompt):
+        # The platform of a SEED does not gate anything: we are not scraping
+        # it. Asking for it here stalls the search behind an irrelevant field.
+        return []
     texts = _user_texts(prompt, history)
+    # The handles are often not in THIS message. "same audience" — the whole
+    # of a reply that picks how to compare — names nobody, and the handles it
+    # inherits come from the question two turns back. Read on its own it looks
+    # like a bare answer inside a named-account job, so the platform question
+    # fired and grounding was skipped: picking an option ended the search
+    # instead of refining it.
+    #
+    # So when this message names nobody, the turn that DID name them decides.
+    # A message carrying its own handles is still judged on its own merits,
+    # which keeps "scrape @a and @b" later in the same thread a real job.
+    if not extract_handles(prompt) and any(accounts_are_references(t) for t in texts):
+        return []
     named = extract_handles(*texts)
     known_h = {account.handle.lower() for account in (known or [])}
     unknown = [handle for handle in named if handle not in known_h]

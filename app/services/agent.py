@@ -155,10 +155,38 @@ def generate_research_plan(
                 ok=True,
                 plan=None,
                 clarifying_question=web.question,
+                # When a bare name was resolved, say who we took it to be
+                # before anything else — it is the assumption most worth
+                # correcting, and it is ours, not theirs.
+                #
+                # Otherwise: a comparison is not missing a detail, it is
+                # ambiguous. The operator gave a complete request whose answer
+                # depends on a choice only they can make.
                 understood_so_far=(
-                    "I can search the web for this, but I need one more detail first."
+                    web.prose
+                    or (
+                        "Similar can mean different things here, and each one "
+                        "gives a different list."
+                        if web.comparison_bases
+                        else "I can search the web for this, but I need one "
+                             "more detail first."
+                    )
                 ),
                 missing_fields=web.missing,
+                comparison_bases=web.comparison_bases,
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
+        if web.action == "respond":
+            # Answered from the conversation. No plan, no findings, no sources
+            # — the answer IS the reply, and re-rendering the previous turn's
+            # creator cards underneath it would suggest a fresh search ran.
+            return AgentResult(
+                ok=True,
+                plan=None,
+                understood_so_far=web.prose,
+                clarifying_question=web.next_step,
+                missing_fields=[],
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
@@ -178,6 +206,7 @@ def generate_research_plan(
                 creators=web.creators,
                 hashtags=web.hashtags,
                 markets=web.markets,
+                comparison_bases=web.comparison_bases,
                 searched_for=web.query,
                 awaiting_approval=True,
                 latency_ms=int((time.perf_counter() - started) * 1000),
