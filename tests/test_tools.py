@@ -250,3 +250,83 @@ def test_a_profile_does_not_repeat_the_handle_as_a_display_name():
 
     assert "display name" not in out
     assert out.count("verified") == 1 and "not verified" not in out
+
+
+def _thin_account(**over):
+    item = {"text": "clip", "author_name": "sarkodie", "author_fans": 30,
+            "author_nickname": "comfortagyeiwaa46", "author_verified": False}
+    item.update(over)
+    return {"items": [item]}
+
+
+def test_an_unverified_famous_name_gets_checked_against_the_web():
+    """@sarkodie on TikTok is thirty followers called "comfortagyeiwaa46".
+    One free search says nothing points at it and the name resolves to
+    @sarkodie.official — so the reply says so instead of building on it."""
+    from app.services.grounding import HandleCheck, ResolvedSeed
+
+    wrong = HandleCheck(
+        handle="sarkodie", platform="tiktok", backed=False,
+        alternative=ResolvedSeed(name="sarkodie", handle="sarkodie.official",
+                                 platform="tiktok",
+                                 url="https://www.tiktok.com/@sarkodie.official"),
+    )
+    tc = _tc("creators like @sarkodie")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_thin_account()), \
+         patch("app.services.grounding.check_handle", return_value=wrong) as chk:
+        out = run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    assert chk.call_args.args == ("sarkodie", "tiktok")
+    assert "CHECK:" in out
+    assert "@sarkodie.official" in out
+    assert "30 followers" in out          # the honest reading is still there
+
+
+def test_a_verified_account_is_not_second_guessed():
+    """Settled. Spending a search to doubt a verified account is noise."""
+    tc = _tc("creators like @khaby")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_thin_account(author_verified=True, author_fans=1_000_000)), \
+         patch("app.services.grounding.check_handle") as chk:
+        out = run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    chk.assert_not_called()
+    assert "CHECK:" not in out
+
+
+def test_a_backed_handle_is_left_alone():
+    """Unverified is not wrong. A small creator the operator meant to research
+    must not be second-guessed just for being small."""
+    from app.services.grounding import HandleCheck
+
+    fine = HandleCheck(handle="sarkodie", platform="tiktok", backed=True,
+                       alternative=None)
+    tc = _tc("creators like @sarkodie")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_thin_account()), \
+         patch("app.services.grounding.check_handle", return_value=fine):
+        out = run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    assert "CHECK:" not in out
+
+
+def test_a_failed_check_leaves_the_profile_as_it_was():
+    """The search is a bonus. Losing it must not lose the reading."""
+    tc = _tc("creators like @sarkodie")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_thin_account()), \
+         patch("app.services.grounding.check_handle",
+               side_effect=RuntimeError("tavily down")):
+        out = run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    assert "CHECK:" not in out
+    assert "30 followers" in out

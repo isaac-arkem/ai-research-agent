@@ -319,6 +319,32 @@ def profile(tc: ToolContext, handle: str, platform: str) -> str:
     if followers:
         head += f", {int(followers):,} followers"
     head += ", verified" if verified else ", not verified"
+
+    # An unverified account with a famous name is the shape of a fan page, and
+    # the shape of @sarkodie on TikTok: thirty followers, display name
+    # "comfortagyeiwaa46". One free search says whether anything on the web
+    # points at this profile on this platform, and what the name resolves to
+    # instead. A verified account is settled, so it is not asked about.
+    #
+    # It is a remark, never a gate. Results vary between runs, and a small
+    # creator the operator has every right to research draws nothing either —
+    # so the failure that matters is silence, not a wrong handle dropped.
+    if not verified:
+        try:
+            from app.services.grounding import check_handle
+
+            checked = check_handle(handle, platform, settings=tc.settings)
+        except Exception as exc:
+            logger.warning("tools: could not check @%s: %s", handle, exc)
+            checked = None
+        if checked is not None and checked.looks_wrong:
+            other = checked.alternative
+            head += (
+                f"\nCHECK: nothing on the web points at @{handle} on {platform}, "
+                f"and searching the name gives @{other.handle} on {other.platform}. "
+                f"This may not be who the operator meant — say so rather than "
+                f"building on it."
+            )
     if tags:
         head += f"\nhashtags they use: {', '.join('#' + t for t in tags[:12])}"
     return head + "\nrecent captions:\n" + "\n".join(lines)

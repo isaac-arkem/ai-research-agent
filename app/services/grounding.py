@@ -1931,6 +1931,84 @@ def resolve_seed(
     return None
 
 
+@dataclass
+class HandleCheck:
+    """A handle the operator typed, weighed against what the web says."""
+
+    handle: str
+    platform: str
+    backed: bool                              # the web points at THIS profile
+    alternative: Optional[ResolvedSeed]       # who they probably meant, if anyone
+
+    @property
+    def looks_wrong(self) -> bool:
+        return not self.backed and self.alternative is not None
+
+
+def check_handle(
+    handle: str, platform: str, *, settings, timeout: Optional[float] = None
+) -> Optional[HandleCheck]:
+    """Does anything on the web point at this account?
+
+    A handle the operator typed was taken as exact and final — they said who
+    they meant, so re-asking would be asking a settled question. That holds
+    for a handle that is right. tiktok.com/@sarkodie is a real account with
+    thirty followers whose display name is "comfortagyeiwaa46"; a scrape of
+    it returns his fans' idea of him and nothing of the artist, and nothing
+    in the run says so.
+
+    One free search separates them. Four pages point at @sarkodie.official
+    and none at @sarkodie, and a plain typo — @sarkodei — draws nothing
+    either. Zero is not proof of a wrong account: a small creator the
+    operator has every right to research also draws nothing. So this only
+    ever produces a sentence to read. It does not drop the handle, and it
+    does not substitute the alternative — the operator does that, in one
+    message, if we were right to mention it.
+
+    None when the search fails, which leaves the turn exactly as it was.
+    """
+    label = (handle or "").strip().lstrip("@")
+    want_platform = (platform or "").strip().lower()
+    if not label or want_platform not in ("instagram", "tiktok"):
+        return None
+    site = "tiktok.com" if want_platform == "tiktok" else "instagram.com"
+    try:
+        provider = provider_from_settings(settings)
+        results = provider.search(SearchQuery(
+            text=f'"@{label}" {site} profile',
+            limit=8,
+            timeout=timeout or getattr(settings, "search_timeout", 15.0),
+        ))
+    except Exception as exc:
+        logger.warning("web grounding: could not check @%s: %s", label, exc)
+        return None
+
+    want = _norm_subject(label)
+    backed = any(
+        found_platform.lower() == want_platform and _norm_subject(found) == want
+        for result in results or []
+        for found_platform, found in _PROFILE_URL_RE.findall(
+            getattr(result, "url", "") or ""
+        )
+    )
+    if backed:
+        logger.info("web grounding: @%s on %s is backed", label, want_platform)
+        return HandleCheck(
+            handle=label, platform=want_platform, backed=True, alternative=None,
+        )
+
+    # Nothing points at it. The handle is usually the name with the spelling
+    # rubbed off, so it is also the best thing we have to search on.
+    alternative = resolve_seed(label, settings=settings, timeout=timeout)
+    if alternative and _norm_subject(alternative.handle) == want:
+        alternative = None                    # it resolved to itself; no news
+    logger.info("web grounding: nothing points at @%s on %s (alternative: %s)",
+                label, want_platform, alternative.handle if alternative else "none")
+    return HandleCheck(
+        handle=label, platform=want_platform, backed=False, alternative=alternative,
+    )
+
+
 def _role_of_turn(turn) -> Optional[str]:
     return getattr(turn, "role", None) or (
         turn.get("role") if isinstance(turn, dict) else None

@@ -2843,3 +2843,92 @@ def test_a_scraped_creator_carries_what_it_posts():
     creator = creators_from_post_authors([cand])[0]
     assert "925,600 followers" in creator.why
     assert "Tune in weekdays 6am" in creator.why
+
+
+# --------------------------------------------------------------------------
+# check_handle — a handle the operator typed is exact, not necessarily right
+# --------------------------------------------------------------------------
+
+def _hit(url, title=""):
+    from types import SimpleNamespace
+    return SimpleNamespace(url=url, title=title, snippet="", content="")
+
+
+def test_a_handle_the_web_points_at_is_left_alone():
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings") as prov:
+        prov.return_value.search.return_value = [
+            _hit("https://www.tiktok.com/@sarkodie.official", "Sarkodie"),
+        ]
+        got = check_handle("sarkodie.official", "tiktok", settings=_settings())
+
+    assert got.backed is True
+    assert got.looks_wrong is False
+    assert prov.return_value.search.call_count == 1      # no second search
+
+
+def test_a_handle_nothing_points_at_offers_what_the_name_resolves_to():
+    from app.services.grounding import ResolvedSeed, check_handle
+
+    real = ResolvedSeed(name="sarkodie", handle="sarkodie.official",
+                        platform="tiktok", url="u")
+    with patch("app.services.grounding.provider_from_settings") as prov, \
+         patch("app.services.grounding.resolve_seed", return_value=real):
+        prov.return_value.search.return_value = [
+            _hit("https://www.tiktok.com/@someoneelse", "someone"),
+        ]
+        got = check_handle("sarkodie", "tiktok", settings=_settings())
+
+    assert got.backed is False
+    assert got.looks_wrong is True
+    assert got.alternative.handle == "sarkodie.official"
+
+
+def test_the_check_is_platform_specific():
+    """instagram.com/sarkodie being real says NOTHING about tiktok.com/@sarkodie,
+    which is the account that was wrong. A platform-blind check called the
+    TikTok handle fine and stayed silent."""
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings") as prov, \
+         patch("app.services.grounding.resolve_seed", return_value=None):
+        prov.return_value.search.return_value = [
+            _hit("https://www.instagram.com/sarkodie/", "Sarkodie"),
+        ]
+        got = check_handle("sarkodie", "tiktok", settings=_settings())
+
+    assert got.backed is False
+    assert "tiktok.com" in prov.return_value.search.call_args.args[0].text
+
+
+def test_a_handle_that_resolves_to_itself_is_no_news():
+    """Unbacked plus "did you mean @sarkodie?" is a sentence worth nobody's time."""
+    from app.services.grounding import ResolvedSeed, check_handle
+
+    itself = ResolvedSeed(name="sarkodie", handle="Sarkodie",
+                          platform="tiktok", url="u")
+    with patch("app.services.grounding.provider_from_settings") as prov, \
+         patch("app.services.grounding.resolve_seed", return_value=itself):
+        prov.return_value.search.return_value = []
+        got = check_handle("sarkodie", "tiktok", settings=_settings())
+
+    assert got.alternative is None
+    assert got.looks_wrong is False
+
+
+def test_a_check_that_cannot_search_says_nothing():
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings",
+               side_effect=RuntimeError("tavily down")):
+        assert check_handle("sarkodie", "tiktok", settings=_settings()) is None
+
+
+def test_a_check_needs_a_platform_it_can_actually_look_at():
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings") as prov:
+        assert check_handle("sarkodie", "youtube", settings=_settings()) is None
+        assert check_handle("", "tiktok", settings=_settings()) is None
+    prov.assert_not_called()
