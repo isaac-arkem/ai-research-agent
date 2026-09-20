@@ -96,7 +96,7 @@ TRIAGE_SYSTEM = """You route one turn of a social-listening research conversatio
 
 Return exactly one of these JSON shapes:
 
-{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>}
+{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "exclude_accounts": ["handles they asked NOT to be like, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>}
 {"action": "ask", "question": "...", "missing": ["country"]}
 {"action": "respond", "reason": "..."}
 {"action": "plan", "reason": "..."}
@@ -197,7 +197,9 @@ This is the difference between "go and look at @x" and "find OTHER people, @x is
   "get me details of @iamhamamat"                     -> reference_accounts: []
   "scrape @iamhamamat's posts"                        -> reference_accounts: []
 
-Both sides of a "like @a but not like @b" are references: @b is still a yardstick, and neither is the answer. Which one is the negative belongs in the topic, in plain words, not here.
+Both sides of a "like @a but not like @b" are references: @b is still a yardstick, and neither is the answer. Put @b in "exclude_accounts" AS WELL, so it is known which way round they meant it.
+
+"exclude_accounts" IS THE ONES THEY ASKED NOT TO BE LIKE. A subset of reference_accounts, never anything else. "like @a but not like @b" -> reference_accounts ["a","b"], exclude_accounts ["b"]. Empty when they only said who they DO want.
 
 An account is a reference even when they never used a comparison word. "the @iamhamamat of Kenya" is asking for somebody else entirely.
 
@@ -597,6 +599,15 @@ def _route_once(
         references.append(handle)
     # Which lane they named, in whatever words. "null" when they did not say,
     # so a real question still gets asked rather than a lane being guessed.
+    excluded: List[str] = []
+    raw_ex = parsed.get("exclude_accounts")
+    if isinstance(raw_ex, str):
+        raw_ex = [raw_ex]
+    for handle in raw_ex if isinstance(raw_ex, list) else []:
+        handle = str(handle or "").strip().lstrip("@")
+        if handle.lower() in ("", "null", "none", "n/a") or handle in excluded:
+            continue
+        excluded.append(handle)
     lane = str(parsed.get("platform") or "").strip().lower()
 
     # The size they asked for, as a number the model read out of their words.
@@ -621,6 +632,7 @@ def _route_once(
         "answer": answer if answer in ANSWER_SHAPES else "overview",
         "subjects": subjects,
         "reference_accounts": references,
+        "exclude_accounts": excluded,
         "platform": lane if lane in ("instagram", "tiktok", "both") else None,
         "max_followers": _count("max_followers"),
         "min_followers": _count("min_followers"),
@@ -2852,8 +2864,25 @@ def _plan_context_for(answer: str, text: str) -> str:
     return _PLAN_CONTEXT.get(answer, "")
 
 
+# Filler. Every account posts these and they describe nobody: a sweep of
+# #explore or #beauty returns the platform. Sorting seed tags by how often
+# they are used puts them FIRST, which is how "creators like @iamhamamat"
+# came back with a Maruti Suzuki tagged #blackbeauty, two dogs, and a foggy
+# morning in Dartmoor.
+_FILLER_TAGS = GENERIC_TAGS | {
+    "creator", "creators", "contentcreator", "contentcreators", "influencer",
+    "influencers", "model", "style", "fashion", "lifestyle", "picoftheday",
+    "instagood", "beautiful", "pretty", "girl", "woman", "women",
+}
+
+
 def seed_signals(
-    seeds: Sequence[str], platform: str, *, settings, limit: int = 6
+    seeds: Sequence[str],
+    platform: str,
+    *,
+    settings,
+    limit: int = 6,
+    topic: str = "",
 ) -> tuple:
     """What the seeds actually post, so the hunt can use it.
 
@@ -2915,7 +2944,18 @@ def seed_signals(
                 key = tag.lower()
                 counts[key] = counts.get(key, 0) + 1
 
-    tags = [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
+    # A tag earns its place by saying something the request did not already
+    # say. #beauty on "find beauty creators" adds nothing and sweeps everyone
+    # who has ever typed it; #thingstodoinaccra is the reason to look at all.
+    said = re.sub(r"[^a-z0-9]", "", (topic or "").lower())
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    tags = [
+        t for t, _ in ranked
+        if t not in _FILLER_TAGS and not (said and t in said)
+    ][:limit]
+    if not tags:
+        logger.info("web grounding: the seeds' tags were all filler (%s)",
+                    [t for t, _ in ranked][:6])
     missed = [h for h in wanted if h.lower() not in seen_authors]
     note = None
     if missed:
@@ -2940,6 +2980,7 @@ def _research_via_engine(
     answer: str = "overview",
     subjects: Optional[Sequence[str]] = None,
     seeds: Optional[Sequence[str]] = None,
+    exclude: Optional[Sequence[str]] = None,
     ctx: Optional[AgentContext] = None,
     history: Optional[Sequence[ChatTurn]] = None,
     limit: Optional[tuple] = None,
@@ -2976,9 +3017,19 @@ def _research_via_engine(
         # planner's are adjectives pulled out of the request.
         lanes = platforms_named(query.text) or platforms_named(prompt)
         seed_note = None
-        if seeds and lanes:
+        # Not the ones they asked NOT to be like. @_zinatubako was swept for
+        # hashtags on a turn that said "but not like @_zinatubako", and its
+        # tags — #explore, #beauty, #reels, #instagram — then drove the whole
+        # search. Wrong twice over: filler, and from the wrong person.
+        positive = [
+            h for h in seeds
+            if h.lstrip("@").casefold() not in {
+                e.lstrip("@").casefold() for e in (exclude or [])
+            }
+        ]
+        if positive and lanes:
             seed_tags, seed_note = seed_signals(
-                seeds, lanes[0], settings=settings,
+                positive, lanes[0], settings=settings, topic=query.text,
             )
             # A handle they typed is exact, which is not the same as right.
             # tiktok.com/@sarkodie is a real account with thirty followers
@@ -2987,7 +3038,7 @@ def _research_via_engine(
             # could not be read — a seed whose posts came back is a seed that
             # exists, and doubting it aloud would be noise.
             if seed_note:
-                checked = check_handle(seeds[0], lanes[0], settings=settings)
+                checked = check_handle(positive[0], lanes[0], settings=settings)
                 if checked is not None and checked.looks_wrong:
                     other = checked.alternative
                     seed_note += (
@@ -3491,6 +3542,7 @@ def gather_web_context(
             prompt=asked, query=query, market=market, settings=settings,
             emit=emit, triage_ms=triage_ms, answer=answer, ctx=ctx,
             subjects=subjects, seeds=seeds, history=history, limit=_limit,
+            exclude=routed.get("exclude_accounts") or [],
         )
         if engine_context is not None:
             return engine_context

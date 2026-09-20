@@ -3470,3 +3470,56 @@ def test_no_token_or_no_platform_means_no_paid_call():
         assert seed_signals(["a"], "youtube", settings=_settings()) == ([], None)
         assert seed_signals([], "tiktok", settings=_settings()) == ([], None)
     actor.assert_not_called()
+
+
+def test_filler_tags_never_drive_the_search():
+    """Ranking a seed's tags by how often they are used puts the filler
+    FIRST — every post carries #explore, #reels, #instagram, #beauty — and a
+    sweep of those returns the platform. It did: "creators like @iamhamamat"
+    came back with a Maruti Suzuki tagged #blackbeauty, two dogs, a nail
+    salon and a foggy morning in Dartmoor."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(
+                   ("a", ["explore", "reels", "instagram", "beauty", "accra"]),
+                   ("a", ["explore", "reels", "instagram", "beauty"]),
+                   ("a", ["explore", "reels", "protectshea"]),
+               )):
+        tags, _ = seed_signals(["a"], "instagram", settings=_settings(),
+                               topic="beauty creators on Instagram")
+
+    assert tags == ["accra", "protectshea"]     # used LEAST, worth the most
+
+
+def test_a_tag_that_only_repeats_the_request_is_not_worth_a_sweep():
+    """#beauty on "find beauty creators" adds nothing the query did not
+    already say, and sweeps everyone who has ever typed it."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(("a", ["ghana", "skincare", "accra"]))):
+        tags, _ = seed_signals(["a"], "instagram", settings=_settings(),
+                               topic="skincare creators in Ghana on Instagram")
+
+    assert tags == ["accra"]
+
+
+def test_the_router_names_the_account_they_do_not_want():
+    """"like @a but not like @b" — @b's hashtags drove the entire search on a
+    turn that said not to. Wrong twice: filler, and from the wrong person."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"t","answer":"creators","subjects":[],'
+              '"reference_accounts":["a","b"],"exclude_accounts":["b"],'
+              '"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators like @a but not like @b", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["reference_accounts"] == ["a", "b"]
+    assert got["exclude_accounts"] == ["b"]
