@@ -3846,3 +3846,90 @@ def test_the_words_still_win_when_they_are_there():
     from app.services.grounding import platforms_named
 
     assert platforms_named("dance creators on tiktok") == ["tiktok"]
+
+
+# --------------------------------------------------------------------------
+# Greetings — Use Case 17, Conversation Navigation
+# --------------------------------------------------------------------------
+
+def test_a_greeting_is_answered_not_refused():
+    """"Hello" was a "skip", which falls through to the planner and comes
+    back "This question is outside what I can help with" — the same sentence
+    as a question about the weather. Somebody saying hello has not asked for
+    anything that is outside anything."""
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"action":"respond","reason":"greeting",'
+                                    '"greeting":true}')):
+        from app.services.grounding import _route_once
+        got = _route_once("Hello", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert got["action"] == "respond"
+    assert got["greeting"] is True
+
+
+def test_a_greeting_is_answered_with_no_conversation_behind_it():
+    """respond_from_thread refuses an empty thread, because "among these,
+    which are from Armenia?" with nothing on screen is not answerable. A
+    greeting asks nothing of the conversation, so an empty one is no reason
+    to refuse it — and the refusal was the rejection message."""
+    from app.services.grounding import respond_from_thread
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"reply":"Hi! How can I help with creator '
+                                    'research today?","next":"What are you after?"}')):
+        reply, nxt = respond_from_thread("Hello", None, openai_key="sk-test",
+                                         greeting=True)
+
+    assert reply.startswith("Hi!")
+
+
+def test_only_a_greeting_gets_that_exemption():
+    """The guard is load-bearing for everything else."""
+    from app.services.grounding import respond_from_thread
+
+    with patch("app.services.grounding.OpenAI") as llm:
+        assert respond_from_thread(
+            "among these, which are from Armenia?", None, openai_key="sk-test",
+        ) == (None, None)
+    llm.assert_not_called()
+
+
+def test_the_empty_thread_is_stated_so_it_cannot_be_imagined():
+    """Cold "Hi" came back "We're looking into creators with over 10k
+    followers. I have a list of handles and follower counts so far." There
+    was no conversation. It invented one."""
+    from app.services.grounding import respond_from_thread
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"reply":"Hi! How can I help?","next":""}')) as llm:
+        respond_from_thread("Hi", None, openai_key="sk-test", greeting=True)
+
+    sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][-1]
+    assert "THERE IS NO CONVERSATION ABOVE THIS" in sent["content"]
+    assert "none to invent" in sent["content"]
+
+
+def test_a_greeting_may_be_short():
+    """"Thanks — I'll be here." is twenty-three characters. The guard that
+    throws away a reply under thirty is right for a research answer and
+    wrong for a goodbye — it threw that one away, and the turn fell through
+    to telling somebody saying goodbye that their question was outside what
+    it can help with."""
+    from app.services.grounding import respond_from_thread
+
+    short = '{"reply":"Thanks — I\'ll be here.","next":""}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(short)):
+        reply, _ = respond_from_thread("Bye", None, openai_key="sk-test", greeting=True)
+    assert reply == "Thanks — I'll be here."
+
+    # ...and still thrown away when it is not a greeting.
+    from app.models.domain import ChatTurn
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage(short)):
+        assert respond_from_thread(
+            "which of these are in the UK?",
+            [ChatTurn(role="user", content="beauty creators"),
+             ChatTurn(role="assistant", content="20 creators")],
+            openai_key="sk-test",
+        ) == (None, None)
