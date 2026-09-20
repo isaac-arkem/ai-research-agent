@@ -241,24 +241,50 @@ def profile(tc: ToolContext, handle: str, platform: str) -> str:
     token = orchestrator_config(tc).get("APIFY_API_TOKEN")
     if not token:
         return "no Apify token configured, so profiles cannot be read."
+    # Empty topic on purpose: the lanes take a topic AND a profile, and pass
+    # the topic to the actor as a keyword search. Handing them the handle as
+    # both meant "@sarkodie's posts" came back mixed with "anyone posting the
+    # word sarkodie" — fan pages, mostly — and the follower count read off the
+    # first item was whichever account happened to sort first. @sarkodie read
+    # 147,100 one minute and 9,214 the next, two different people, both
+    # reported as him. Asking for the profile alone also spares a paid
+    # hashtag run on Instagram.
     window = ("", "")
     try:
         if platform == "tiktok":
             raw = apify_social.search_tiktok_apify(
-                handle, *window, depth="quick", token=token, creators=[handle]
+                "", *window, depth="quick", token=token, creators=[handle]
             )
         else:
             raw = apify_social.search_instagram_apify(
-                handle, *window, depth="quick", token=token, ig_creators=[handle]
+                "", *window, depth="quick", token=token, ig_creators=[handle]
             )
     except Exception as exc:
         logger.warning("tools: profile(%s on %s) failed: %s", handle, platform, exc)
         return f"could not read @{handle} on {platform}: {type(exc).__name__}."
 
-    items = (raw or {}).get("items") or []
+    returned = (raw or {}).get("items") or []
+    # Belt and braces: even asking for the profile alone, an actor is free to
+    # hand back a neighbour. Nothing below is read off a post someone else
+    # wrote, so a stray item costs a line of output, never a wrong number.
+    wanted = handle.lower()
+    items = [
+        i for i in returned
+        if str(i.get("author_name") or "").strip().lstrip("@").lower() == wanted
+    ]
     tc.lane_status[platform] = "ok" if items else "no-results"
     if not items:
         error = (raw or {}).get("error")
+        if returned:
+            others = sorted({
+                str(i.get("author_name") or "").strip().lstrip("@")
+                for i in returned if i.get("author_name")
+            })
+            return (
+                f"@{handle} on {platform} returned no posts of their own"
+                + (f" (got {', '.join('@' + o for o in others[:5])} instead)" if others else "")
+                + ". The handle may be wrong, or the account private."
+            )
         return (
             f"@{handle} on {platform} returned no posts"
             + (f" ({error})" if error else ". The account may be private, renamed, or misspelled.")

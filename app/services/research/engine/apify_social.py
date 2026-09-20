@@ -180,7 +180,12 @@ def search_tiktok_apify(
 
     input_data: Dict[str, Any] = {"resultsPerPage": limit}
     # Plain keyword variants only: clockworks does not support OR syntax.
-    queries = [q for q in expand_tiktok_queries(topic, depth) if " OR " not in q]
+    # An empty topic expands to [""], and a blank searchQueries entry makes the
+    # actor sweep at random. A profile-only read asks with no topic.
+    queries = [
+        q for q in expand_tiktok_queries(topic, depth)
+        if q and q.strip() and " OR " not in q
+    ]
     if queries:
         input_data["searchQueries"] = queries
         input_data["searchSection"] = "/video"

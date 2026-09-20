@@ -107,7 +107,9 @@ def test_reading_a_named_account_does_not_need_a_named_platform():
     with patch("app.services.tools.orchestrator_config",
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_tiktok_apify",
-               return_value={"items": [{"text": "a post", "author_fans": 1000}]}) as actor:
+               return_value={"items": [
+                   {"text": "a post", "author_name": "janedoe", "author_fans": 1000}
+               ]}) as actor:
         out = run_tool("profile", {"handle": "@janedoe", "platform": "tiktok"}, tc)
 
     assert actor.called
@@ -123,7 +125,7 @@ def test_profile_respects_the_same_budget():
     with patch("app.services.tools.orchestrator_config",
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_tiktok_apify",
-               return_value={"items": [{"text": "x"}]}) as actor:
+               return_value={"items": [{"text": "x", "author_name": "a"}]}) as actor:
         run_tool("profile", {"handle": "a", "platform": "tiktok"}, tc)
         out = run_tool("profile", {"handle": "b", "platform": "tiktok"}, tc)
     assert actor.call_count == 1
@@ -138,3 +140,78 @@ def test_an_empty_profile_says_why_rather_than_pretending():
                return_value={"items": []}):
         out = run_tool("profile", {"handle": "ghost", "platform": "tiktok"}, tc)
     assert "no posts" in out and ("private" in out or "misspelled" in out)
+
+
+def test_a_profile_reads_only_the_account_it_asked_for():
+    """The follower count has to come from THEIR post.
+
+    @sarkodie read 147,100 followers one minute and 9,214 the next, because
+    the lane was handed the handle as a keyword search as well as a profile,
+    and the count was taken off whichever item sorted first — usually a fan
+    page. Two different people, both reported as him."""
+    tc = _tc("creators like @sarkodie")
+    items = [
+        {"text": "sarkodie is the goat", "author_name": "sarkodiefanpage",
+         "author_fans": 9214, "hashtags": ["sarkodiefanpage"]},
+        {"text": "new record out friday", "author_name": "sarkodie",
+         "author_fans": 147100, "hashtags": ["ghanamusic"]},
+    ]
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value={"items": items}):
+        out = run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    assert "147,100 followers" in out
+    assert "9,214" not in out
+    assert "1 recent posts" in out
+    assert "#sarkodiefanpage" not in out          # the fan page's tag, not his
+    assert "#ghanamusic" in out
+    assert "new record out friday" in out
+    assert "sarkodie is the goat" not in out
+
+
+def test_a_profile_asks_the_actor_for_the_profile_and_not_the_name():
+    """Passing the handle as the topic made the actor run a keyword sweep
+    alongside the profile read, which is what mixed the accounts together —
+    and on Instagram it also paid for a hashtag run nobody asked for."""
+    tc = _tc("creators like @sarkodie")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value={"items": []}) as actor:
+        run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    topic = actor.call_args.args[0]
+    assert not topic, f"the lane was given a topic to search: {topic!r}"
+    assert actor.call_args.kwargs["creators"] == ["sarkodie"]
+
+
+def test_a_profile_that_returns_only_strangers_says_so():
+    """Silence beats a confident wrong number: if the account is not in what
+    came back, the tool must not read a stranger's followers instead."""
+    tc = _tc("creators like @ghost")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value={"items": [
+                   {"text": "hi", "author_name": "someoneelse", "author_fans": 500}
+               ]}):
+        out = run_tool("profile", {"handle": "ghost", "platform": "tiktok"}, tc)
+
+    assert "no posts of their own" in out
+    assert "@someoneelse" in out
+    assert "500" not in out
+
+
+def test_a_profile_matches_the_handle_however_it_is_written():
+    tc = _tc("creators like @JaneDoe")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value={"items": [
+                   {"text": "post", "author_name": "@JANEDOE", "author_fans": 4200}
+               ]}):
+        out = run_tool("profile", {"handle": "@JaneDoe", "platform": "instagram"}, tc)
+
+    assert "4,200 followers" in out
