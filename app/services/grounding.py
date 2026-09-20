@@ -2623,6 +2623,13 @@ def _merge_creators(first: List[Creator], second: List[Creator]) -> List[Creator
     return out
 
 
+# Below this, a rate is noise: one video reaching past a tiny following
+# swings it by hundreds of per cent. Not a statement about how big an
+# account should be — accounts under it are still returned, they are just
+# not ordered by a number computed over thirty-eight people.
+MIN_FANS_FOR_A_RATE = 1_000
+
+
 def creators_from_post_authors(
     candidates, rank_by: Optional[str] = None
 ) -> List[Creator]:
@@ -2689,12 +2696,28 @@ def creators_from_post_authors(
             if k != "views" and isinstance(v, (int, float))
             and not isinstance(v, bool) and v > 0
         )
-        if rank_by == "engagement_rate" and fans and fans > 0 and acted > 0:
-            rate = acted / fans
-            rank = rate
-            engagement_rate = rate
-        else:
-            engagement_rate = None
+        engagement_rate = None
+        if rank_by == "engagement_rate":
+            # A rate over a handful of followers is arithmetic, not a fact
+            # about the account. @xx.daniellejohnston.xx came top of "highest
+            # engagement rate in the UK" at 1947% on THIRTY-EIGHT followers,
+            # with @uk.girls651 at 150% on fourteen just behind. One video
+            # shown past their own followers does that, and it says nothing
+            # about how an audience behaves because there is barely an
+            # audience. The floor is about the denominator being too small to
+            # divide by, not about small accounts being unwelcome — they are
+            # still returned, just not ranked on a number this noisy.
+            if fans and fans >= MIN_FANS_FOR_A_RATE and acted > 0:
+                engagement_rate = acted / fans
+                rank = engagement_rate
+            else:
+                # BELOW every real rate, not above it. rank was the follower
+                # count, which is hundreds to millions while a rate is 0 to
+                # 20 — so every account whose rate could not be computed
+                # outranked every account whose rate could, and the list came
+                # back led by an account with 119 followers and no rate at
+                # all.
+                rank = -1.0
 
         seen = by_handle.get(handle.lower())
         if seen and seen[0] >= (rank, post_total):

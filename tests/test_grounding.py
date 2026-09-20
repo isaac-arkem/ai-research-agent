@@ -3692,3 +3692,35 @@ def test_views_are_reach_and_do_not_count_as_engagement():
 
     assert "20.0% engagement" in got[0].why
     assert "522" not in got[0].why
+
+
+def test_a_rate_over_a_handful_of_followers_is_arithmetic_not_a_fact():
+    """"Highest engagement rate in the UK" came back led by an account with
+    THIRTY-EIGHT followers at 1947%, and one with fourteen at 150%. A single
+    video shown past their own followers does that, and it says nothing about
+    how an audience behaves because there is barely an audience."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("tiny", 38, 740),            # 1947% — noise
+        _candidate("real", 20_000, 4_000),      # 20% — a fact
+    ], "engagement_rate")
+
+    assert [c.handle for c in got][0] == "real"
+    assert "1947" not in " ".join(c.why for c in got)
+    assert "tiny" in [c.handle for c in got]    # returned, just not ranked on it
+
+
+def test_an_account_with_no_rate_does_not_outrank_every_rate():
+    """rank was the follower count when a rate could not be computed —
+    hundreds to millions, against a rate of 0 to 20. So every account without
+    a rate sorted above every account with one, and the list came back led by
+    an account with 119 followers and no engagement figure at all."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("no_engagement", 119, 0),        # nothing to divide
+        _candidate("has_a_rate", 20_000, 4_000),    # 20%
+    ], "engagement_rate")
+
+    assert [c.handle for c in got][0] == "has_a_rate"
