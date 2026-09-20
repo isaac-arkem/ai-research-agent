@@ -448,11 +448,15 @@ def test_answering_which_niche_does_not_search():
     assert _no_search("tech-giants", history) == (True, False)
 
 
-def test_a_bare_name_after_scrape_counts_as_a_named_account():
-    """"scrape isaac" with no @ is still a named account."""
-    # Still bypassed, by the PLATFORM gate rather than the named-account one:
-    # a handle with no platform is asked about before anything is spent.
-    assert _no_search("scrape isaac") == (False, False)
+def test_a_bare_name_after_scrape_reaches_the_router_and_spends_nothing():
+    """"scrape isaac" used to be recognised by walking the words after
+    "scrape" and deciding which were names. It is a question about what the
+    operator meant, so the router answers it — which is why triage now runs
+    on this turn where a word list used to short-circuit it.
+
+    What these tests protect is the SECOND value, and it is unchanged: a
+    named-account job must not spend a search."""
+    assert _no_search("scrape isaac") == (True, False)
 
 
 # ── and the two regressions this guard caused before ─────────────────
@@ -518,9 +522,10 @@ def test_the_run_of_questions_can_be_any_length():
         history.append(ChatTurn(role="assistant", content=ASK_NICHE))
         history.append(ChatTurn(role="user", content="not an account"))
     history.append(ChatTurn(role="assistant", content=ASK_NICHE))
-    # Still bypassed, by the PLATFORM gate rather than the named-account one:
-    # a handle with no platform is asked about before anything is spent.
-    assert _no_search("still answering", history) == (False, False)
+    # Reaches the router now — continues_named_account_job walked this thread
+    # from a word list and is gone. Still spends no search, which is the part
+    # that matters.
+    assert _no_search("still answering", history) == (True, False)
 
 
 def test_a_plan_part_way_back_stops_the_walk():

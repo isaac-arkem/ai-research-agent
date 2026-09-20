@@ -18,10 +18,6 @@ from app.services.validator import VALID_PLATFORMS
 logger = logging.getLogger(__name__)
 
 HANDLE_RE = re.compile(r"@([A-Za-z0-9._]{2,30})")
-BARE_AFTER_SCRAPE_RE = re.compile(
-    r"(?:scrape|scraping)\s+(?:(?:the|these|this)\s+)?(?:accounts?|profiles?|handles?)?\s*",
-    re.IGNORECASE,
-)
 HANDLE_TOKEN_RE = re.compile(r"[A-Za-z0-9._]{2,30}")
 SKIP_TOKENS = {
     "on",
@@ -53,44 +49,6 @@ SKIP_TOKENS = {
 # Words that never appear inside a list of account names, and so mark where
 # the list ended and the sentence resumed. SKIP_TOKENS are passed over ("and",
 # "on Instagram"); these stop the walk outright.
-PROSE_TOKENS = {
-    "about",
-    "because",
-    "beacuse",
-    "can",
-    "find",
-    "for",
-    "get",
-    "his",
-    "her",
-    "their",
-    "i",
-    "if",
-    "in",
-    "is",
-    "it",
-    "me",
-    "my",
-    "of",
-    "or",
-    "our",
-    "so",
-    "specific",
-    "than",
-    "them",
-    "then",
-    "they",
-    "to",
-    "want",
-    "we",
-    "what",
-    "which",
-    "who",
-    "why",
-    "you",
-    "your",
-}
-
 NICHE_SLUG_RE = re.compile(r"^[a-z0-9_]+$")
 PLATFORM_WORD_RE = re.compile(
     r"\b(tiktok|instagram|insta|reels)\b|\b(?:ig|tt)\b",
@@ -110,7 +68,24 @@ def _clean_handle(raw: str) -> str:
 
 
 def extract_handles(*texts: str) -> List[str]:
-    """Pull @handles, and bare names after 'scrape', out of operator text."""
+    """Pull the @handles out of operator text. Literally the @ ones.
+
+    This used to also guess at BARE names after the word "scrape" — walking
+    the words that followed and deciding, from two hand-written lists, which
+    were names and which were English. That is a judgement about what the
+    operator meant, and it was made by a word list.
+
+    It got it wrong in the way judgements-by-word-list always do: "scrape
+    sarkodie's specific profiles so find his handles" became the accounts
+    ['specific', 'so', 'find', 'his']. Four ordinary words promoted to
+    handles, which flipped the turn into a named-account job, which bypasses
+    research entirely — and then every reply for the rest of the thread was
+    read as answering a question about those four accounts. Sarkodie's
+    handles were asked for eight times and never found.
+
+    Who the operator named is now the router's "subjects", decided by reading
+    the sentence. This does the part that needs no judgement: an @ is an @.
+    """
     found: List[str] = []
     seen = set()
 
@@ -126,38 +101,6 @@ def extract_handles(*texts: str) -> List[str]:
     blob = " ".join(t for t in texts if t)
     for match in HANDLE_RE.finditer(blob):
         add(match.group(1))
-
-    # Bare names after "scrape" — "scrape isaac and dave". Three guards, and
-    # any of them abandons the whole bare list rather than truncating it.
-    #
-    # Truncating is what turned "scrape sarkodie's specific profiles so find
-    # his handles" into the accounts ['specific', 'so', 'find', 'his'] — four
-    # English words promoted to handles because the walk skipped what it could
-    # not parse and kept going. That flipped the turn into a named-account job,
-    # which bypasses research entirely, and every reply after it was read as
-    # answering a question about those four accounts. The operator asked eight
-    # times to have Sarkodie's handles found and got the same question back.
-    #
-    # The asymmetry is deliberate. Missing a bare-name list costs one search
-    # the operator can redirect in a sentence; inventing one silences research
-    # for the rest of the thread.
-    if not found:  # some names carry @ — then ALL the names do, and we have them
-        scrape_tail = BARE_AFTER_SCRAPE_RE.split(blob, maxsplit=1)
-        if len(scrape_tail) > 1:
-            bare: List[str] = []
-            for token in re.split(r"[\s,+/&]+", scrape_tail[1]):
-                cleaned = _clean_handle(token)
-                if cleaned in PROSE_TOKENS:
-                    bare = []  # a sentence, not a list of names
-                    break
-                if not cleaned or cleaned in SKIP_TOKENS:
-                    continue  # a connector: "and", "on Instagram", "accounts"
-                if not HANDLE_TOKEN_RE.fullmatch(cleaned):
-                    bare = []  # "sarkodie's" — prose punctuation, so prose
-                    break
-                bare.append(token)
-            for token in bare:
-                add(token)
 
     return found
 
@@ -275,96 +218,6 @@ def _content_of(turn) -> str:
 
 
 # Fields whose question has nothing to do with which accounts to scrape.
-_NOT_ABOUT_ACCOUNTS = {"basis"}
-
-
-def _pending_question(turn) -> bool:
-    """Was this assistant turn a question still waiting on an answer?
-
-    A review turn also carries a "clarifying_question", so the word decides
-    nothing. What separates them is missing_fields: a question names what it
-    still needs, a review turn names nothing.
-    """
-    content = _content_of(turn)
-    if "clarifying_question" not in content:
-        return False
-    try:
-        missing = json.loads(content).get("missing_fields")
-    except ValueError:
-        return False
-    if not isinstance(missing, list) or not missing:
-        return False
-    # Not every pending question is about the accounts. Asking what "similar"
-    # means is a question about the SEARCH, and the reply to it — "same level
-    # of fame" — names nobody, so it read as a bare field answer inside a
-    # named-account job and the turn was routed to the planner: the operator
-    # picked how to compare and was asked which platform to scrape.
-    fields = {str(m).strip().lower() for m in missing}
-    return bool(fields - _NOT_ABOUT_ACCOUNTS)
-
-
-def continues_named_account_job(
-    prompt: str, history: Optional[Iterable] = None
-) -> bool:
-    """Is this turn answering a question about accounts already named?
-
-    "instagram" names nothing on its own, but as the answer to "which
-    platform is 'isaac' on?" it belongs to a job whose plan IS that account.
-
-    A request can take several questions to settle — platform, then niche —
-    so this walks back through the run of questions and answers, not just the
-    last one. The walk STOPS at the first assistant turn that is not a
-    question still waiting on a field: a plan or a review turn closes a
-    request, and what was named before it belongs to a finished job.
-
-    That stopping rule is the whole safety of it. Without a way to tell a
-    pending question from a review turn, an earlier version walked back
-    through everything and silenced research for the rest of the
-    conversation.
-    """
-
-    turns = list(history or [])
-    if not turns or _role_of(turns[-1]) != "assistant":
-        return False
-
-    # A comparison thread is not a named-account job, however many @handles it
-    # carries: the accounts are what "similar" is measured against.
-    #
-    # Without this, answering the comparison's own question re-opened the
-    # bypass. "Which platform should I look on?" is stored with
-    # missing_fields ["platform"], which reads as a question ABOUT the
-    # accounts — so "Instagram" was taken as a field answer inside a scrape
-    # job, grounding was skipped, and the planner built a plan with no country
-    # and failed validation. The basis question hit the same trap and was
-    # excluded by name; naming each new field one at a time is not a rule, so
-    # this states the actual one.
-    if any(
-        accounts_are_references(_content_of(t))
-        for t in turns
-        if _role_of(t) == "user"
-    ):
-        return False
-
-    for turn in reversed(turns):
-        if _role_of(turn) == "assistant":
-            if not _pending_question(turn):
-                return False      # the chain ends here
-            continue
-        if _role_of(turn) == "user" and extract_handles(_content_of(turn)):
-            return True
-    return False
-
-
-# A named account is not always the target. "scrape @sarkodie" asks for that
-# account; "creators similar to @sarkodie" asks for OTHER accounts, and names
-# him only to say what they should be like. The words below are what separates
-# the two, and getting it wrong is expensive in one direction: read as a target,
-# a comparison never reaches the search at all — it goes straight to a scrape
-# job for the two accounts the operator was comparing AGAINST.
-#
-# "like" is in here but cannot be matched bare: "I would like to scrape @isaac"
-# is not a comparison. It counts only where it is not preceded by would/should/'d
-# and not followed by "to".
 _COMPARISON_RE = re.compile(
     r"\b(?:similar|similarly|similar\s+to|lookalikes?|look-alikes?|"
     r"comparable|compares?|comparison|competitors?|alternatives?|"
@@ -386,25 +239,6 @@ def accounts_are_references(text: str) -> bool:
     similarity and engagement rate" into a plan to scrape those two accounts.
     """
     return bool(text) and bool(_COMPARISON_RE.search(text))
-
-
-def names_accounts(prompt: str) -> bool:
-    """Does THIS message name accounts to scrape?
-
-    Deliberately only this message. An earlier version walked back through
-    the conversation trying to work out whether a bare answer like
-    "tech-giants" belonged to a named-account job, and got it wrong twice —
-    first by treating any handle in the thread as permanent, then by cutting
-    the chain in the wrong place. That judgment needs to read intent, which
-    is what the router model is for; this is the part that does not.
-
-    So: an unambiguous, free check for the unambiguous case. Everything that
-    depends on context is decided by triage, which has the history.
-    """
-    if accounts_are_references(prompt):
-        # Seeds, not a job. Let the router read the sentence.
-        return False
-    return bool(extract_handles(prompt))
 
 
 def handles_needing_platform(

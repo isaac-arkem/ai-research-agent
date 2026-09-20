@@ -3306,3 +3306,61 @@ def test_a_router_that_says_nothing_falls_back_to_the_word_lists():
             _ctx(), settings=_settings())
 
     assert web.missing == ["basis"]       # the old path still works
+
+
+# --------------------------------------------------------------------------
+# The size the operator asked for, read by the model
+# --------------------------------------------------------------------------
+
+def test_the_router_reads_the_size_out_of_the_words_used():
+    """The regex knew "exclude|under|over|at least" plus a word-number table.
+    "micro influencers only", "i don't want the huge accounts" and "nothing
+    too big" set NO limit at all, and the answer came back led by accounts at
+    five million. It also could not hold two bounds: "between 10k and 500k"
+    returned one of them."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"beauty creators in Ghana",'
+              '"answer":"creators","subjects":[],"reference_accounts":[],'
+              '"platform":null,"min_followers":10000,"max_followers":500000}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators between 10k and 500k", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["min_followers"] == 10000
+    assert got["max_followers"] == 500000
+
+
+def test_a_size_nobody_asked_for_is_never_invented():
+    """A limit nobody requested silently deletes most of the answer, and they
+    cannot see what is not there."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"beauty creators in Ghana",'
+              '"answer":"creators","subjects":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators in Ghana", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["min_followers"] is None
+    assert got["max_followers"] is None
+
+
+def test_a_size_that_is_not_a_number_is_no_size():
+    """A model asked for a number sometimes sends "a million" or "null"."""
+    from app.services.grounding import _route_once
+
+    for bad in ('"a million"', '"null"', "true", "-5", "0"):
+        routed = ('{"action":"search","topic":"t","answer":"creators",'
+                  '"subjects":[],"max_followers":%s}' % bad)
+        with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+            got = _route_once("t", _ctx(), None, openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+        assert got["max_followers"] is None, bad
+
+
+def test_the_old_parser_still_covers_a_turn_the_router_did_not_speak_for():
+    """The regex is the fallback now, not the decision."""
+    from app.services.grounding import follower_limit
+
+    assert follower_limit("exclude anyone over one million followers") == (None, 1_000_000)
+    assert follower_limit("at least 50k followers") == (50_000, None)

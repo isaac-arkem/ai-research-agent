@@ -19,8 +19,6 @@ from app.services.grounding import (
 from app.services.known_accounts import (
     handles_needing_platform,
     known_accounts_from_text,
-    continues_named_account_job,
-    names_accounts,
     platform_clarifying_question,
 )
 from app.services.prompt import assemble_system_prompt, build_chat_messages
@@ -133,8 +131,12 @@ def generate_research_plan(
     # real named-account job, and a skip falls through to the planner exactly
     # as the bypass did.
     #
-    # names_accounts and continues_named_account_job are kept. They are facts
-    # worth having — they just no longer make the decision.
+    # names_accounts and continues_named_account_job are gone with it. Once
+    # the router made the decision they were imported and never called, and
+    # both worked by matching words — the second one walked the thread
+    # deciding, from a list, whether a bare reply still belonged to a job
+    # about named accounts. That is a question about what the operator meant,
+    # and the router answers it with "subjects".
 
     web = None
     if settings is not None and not missing_platforms:

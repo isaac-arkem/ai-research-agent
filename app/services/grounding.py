@@ -96,7 +96,7 @@ TRIAGE_SYSTEM = """You route one turn of a social-listening research conversatio
 
 Return exactly one of these JSON shapes:
 
-{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "platform": "instagram|tiktok|both|null"}
+{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>}
 {"action": "ask", "question": "...", "missing": ["country"]}
 {"action": "respond", "reason": "..."}
 {"action": "plan", "reason": "..."}
@@ -192,6 +192,20 @@ This is the difference between "go and look at @x" and "find OTHER people, @x is
 Both sides of a "like @a but not like @b" are references: @b is still a yardstick, and neither is the answer. Which one is the negative belongs in the topic, in plain words, not here.
 
 An account is a reference even when they never used a comparison word. "the @iamhamamat of Kenya" is asking for somebody else entirely.
+
+"max_followers" / "min_followers" IS THE SIZE THEY ASKED FOR, AS A NUMBER.
+
+Read it out of whatever words they used and give the count. "exclude celebrities" is a ceiling, and a number they can argue with beats an instruction nobody acted on — use 1000000. "micro influencers", "not the big names", "keep it small", "nothing huge" are ceilings too; 100000 unless they said otherwise. "at least 10k" is a floor.
+
+  "exclude anyone over one million followers"  -> max_followers: 1000000
+  "micro creators only, on TikTok"             -> max_followers: 100000
+  "i don't want the huge accounts"             -> max_followers: 1000000
+  "at least 50k followers"                     -> min_followers: 50000
+  "between 10k and 500k"                       -> min_followers: 10000, max_followers: 500000
+
+null for both when they said nothing about size. Never invent a limit nobody asked for: it silently deletes most of the answer, and they cannot see what is not there.
+
+A SIZE HOLDS FOR THE WHOLE CONVERSATION. It is usually in the first message — "exclude celebrities and accounts over one million followers" — while the message in hand is "same country and scene". Carry it, or it is obeyed on turn one and forgotten on every turn after.
 
 "platform" IS WHICH LANE THEY NAMED, HOWEVER THEY NAMED IT. "on the gram", "insta", "IG", "reels" are Instagram. "tiktok", "TT" are TikTok. "on short form video" and "on the app" name NOTHING — that is genuinely TikTok or Reels and only they know, so return null and let them be asked. null when they did not say.
 
@@ -576,6 +590,21 @@ def _route_once(
     # Which lane they named, in whatever words. "null" when they did not say,
     # so a real question still gets asked rather than a lane being guessed.
     lane = str(parsed.get("platform") or "").strip().lower()
+
+    # The size they asked for, as a number the model read out of their words.
+    # It was a regex over "exclude|under|over|at least" plus a table of word
+    # numbers, so "micro influencers only" and "nothing too big" set no limit
+    # at all and the answer came back led by accounts at five million.
+    def _count(key: str) -> Optional[int]:
+        raw = parsed.get(key)
+        if raw is None or isinstance(raw, bool):
+            return None
+        try:
+            value = int(float(str(raw).replace(",", "").strip()))
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
     return {
         "action": "search",
         "topic": topic,
@@ -585,6 +614,8 @@ def _route_once(
         "subjects": subjects,
         "reference_accounts": references,
         "platform": lane if lane in ("instagram", "tiktok", "both") else None,
+        "max_followers": _count("max_followers"),
+        "min_followers": _count("min_followers"),
     }
 
 
@@ -2826,6 +2857,7 @@ def _research_via_engine(
     seeds: Optional[Sequence[str]] = None,
     ctx: Optional[AgentContext] = None,
     history: Optional[Sequence[ChatTurn]] = None,
+    limit: Optional[tuple] = None,
 ) -> Optional[WebContext]:
     """Run the multi-source engine. None when it has nothing to offer.
 
@@ -2927,19 +2959,22 @@ def _research_via_engine(
     creators = _only_the_subjects(creators, subjects)
     # ...and never answer "who is like X" with X.
     creators = _drop_the_seeds(creators, seeds)
-    # The size limit is in the FIRST message — "exclude celebrities and
-    # accounts over one million followers" — while the message in hand is
-    # "same country and scene". Read from the thread, or the constraint is
-    # obeyed on turn one and forgotten on every turn after it.
-    creators = _within_follower_limit(
-        creators,
-        follower_limit(
+    # The size the operator asked for, read by the model out of their own
+    # words and handed in. A regex used to do it, over "exclude|under|over|
+    # at least" plus a table of word numbers — so "micro influencers only"
+    # and "i don't want the huge accounts" set no limit at all, and the
+    # answer came back led by accounts at five million.
+    #
+    # The regex stays as the fallback, for a turn the router did not speak
+    # for. It no longer decides what the model has already decided.
+    if limit is None:
+        limit = follower_limit(
             " ".join([prompt] + [
                 _content_of_turn(t) for t in (history or [])
                 if _role_of_turn(t) == "user"
             ])
-        ),
-    )
+        )
+    creators = _within_follower_limit(creators, limit)
     # Last, because it is the only step that judges a creator against the
     # QUESTION rather than against a number. Ranking sorts and never drops.
     creators = drop_irrelevant_creators(
@@ -3321,10 +3356,15 @@ def gather_web_context(
     )
 
     if getattr(settings, "research_engine_enabled", False):
+        # The model's reading of "how big", when it gave one. None hands the
+        # old parser the whole thread, exactly as before.
+        _ceiling = routed.get("max_followers")
+        _floor = routed.get("min_followers")
+        _limit = (_floor, _ceiling) if (_floor or _ceiling) else None
         engine_context = _research_via_engine(
             prompt=asked, query=query, market=market, settings=settings,
             emit=emit, triage_ms=triage_ms, answer=answer, ctx=ctx,
-            subjects=subjects, seeds=seeds, history=history,
+            subjects=subjects, seeds=seeds, history=history, limit=_limit,
         )
         if engine_context is not None:
             return engine_context
