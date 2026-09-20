@@ -317,7 +317,14 @@ When in doubt answer "overview". It shows the operator what was found and lets t
 
 A question that names a country is usually "creators" or "overview", never "markets" — the where is already settled. A question containing "what country", "which country", "which market", "where can I", "best country" is "markets" even when it also names a niche.
 
-"plan" — the operator is accepting search results already shown in this conversation ("yes", "go ahead", "looks good", "that works"). Only valid when findings already appear in the history.
+"plan" — the operator wants a run built from results already shown in this conversation. Two shapes, and both are "plan":
+
+  ACCEPTING them: "yes", "go ahead", "looks good", "that works".
+  ASKING FOR THE PLAN: "plan with it", "write a plan for the results so we can scrape", "turn that into a scrape job", "build me a run from those", "let's plan with the handles instead".
+
+The second is not a new search, however much it sounds like an instruction. The creators are on screen; searching again throws them away and returns a different list. "turn that into a scrape job" was routed as a search for exactly that reason.
+
+Only valid when findings already appear in the history. With nothing shown yet, a request to plan is a "search" — there is nothing to plan with.
 
 "skip" — no search can help. Four kinds of message can never be researched, whatever else is going on in the conversation:
 
@@ -1679,6 +1686,14 @@ PLATFORM_WORDS = {
     "tiktok": ("tiktok", "tik tok", "tik-tok"),
     "instagram": ("instagram", "insta", " ig "),
 }
+
+
+def _lanes_from(platform: Optional[str]) -> List[str]:
+    """The router's platform as a lane list. "both" is both."""
+    named = (platform or "").strip().lower()
+    if named == "both":
+        return ["instagram", "tiktok"]
+    return [named] if named in ("instagram", "tiktok") else []
 
 
 def platforms_named(text: str) -> List[str]:
@@ -3216,6 +3231,7 @@ def _research_via_engine(
     window_days: Optional[int] = None,
     rank_by: Optional[str] = None,
     typed_hashtags: Optional[Sequence[str]] = None,
+    platform: Optional[str] = None,
 ) -> Optional[WebContext]:
     """Run the multi-source engine. None when it has nothing to offer.
 
@@ -3260,7 +3276,15 @@ def _research_via_engine(
         # Look, then hunt. The seeds' own tags go first: they are the only
         # evidence in the turn that came from the right person, and the
         # planner's are adjectives pulled out of the request.
-        lanes = platforms_named(query.text) or platforms_named(prompt)
+        # The router's reading counts here too. It was used for "do we need
+        # to ask which platform?" but not for "which lane may spend money",
+        # so "on the gram" stopped the question being asked and then left
+        # Instagram shut anyway — the worst of both.
+        lanes = (
+            platforms_named(query.text)
+            or platforms_named(prompt)
+            or _lanes_from(platform)
+        )
         seed_note = None
         # Not the ones they asked NOT to be like. @_zinatubako was swept for
         # hashtags on a turn that said "but not like @_zinatubako", and its
@@ -3331,7 +3355,7 @@ def _research_via_engine(
             # A platform the operator named by hand. They asked about
             # Instagram and TikTok; not querying those is answering a
             # different question.
-            force_lanes=platforms_named(query.text) or platforms_named(prompt),
+            force_lanes=lanes,
             # One named person: the web lane reads their profile pages, and
             # the scrape lanes would only sweep a hashtag full of other people.
             subjects=subjects,
@@ -3798,6 +3822,7 @@ def gather_web_context(
             window_days=routed.get("window_days"),
             rank_by=routed.get("rank_by"),
             typed_hashtags=routed.get("hashtags") or [],
+            platform=routed.get("platform"),
         )
         if engine_context is not None:
             return engine_context

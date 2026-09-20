@@ -3824,3 +3824,25 @@ def test_every_swallowing_fallback_tells_them_apart():
     src = Path("app/services/grounding.py").read_text()
     bare = re.findall(r'logger\.warning\("web grounding: [^"]*"[^)]*, exc\)', src)
     assert not bare, f"these swallow a bug as a warning: {bare}"
+
+
+def test_the_router_platform_opens_the_lane_as_well_as_silencing_the_question():
+    """"on the gram" was read by the router, which stopped the "which
+    platform?" question being asked — and then the paid lane was still gated
+    on a word list that had never heard of it. The question skipped AND the
+    lane shut: the worst of both."""
+    from app.services.grounding import _lanes_from
+
+    assert _lanes_from("instagram") == ["instagram"]
+    assert _lanes_from("tiktok") == ["tiktok"]
+    assert _lanes_from("both") == ["instagram", "tiktok"]
+    assert _lanes_from(None) == []
+    assert _lanes_from("youtube") == []          # nothing we can scrape
+
+
+def test_the_words_still_win_when_they_are_there():
+    """The router's reading is the FALLBACK, not the override. If they typed
+    "tiktok" the lane is TikTok, whatever a model decided."""
+    from app.services.grounding import platforms_named
+
+    assert platforms_named("dance creators on tiktok") == ["tiktok"]
