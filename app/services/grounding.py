@@ -3324,14 +3324,6 @@ def gather_web_context(
     planner runs unaided, exactly as it did before this module existed.
     """
 
-    # The model works the turn itself, with tools, instead of walking the path
-    # below. Same WebContext out, so nothing downstream knows the difference.
-    if getattr(settings, "research_tools_enabled", False):
-        from app.services.agent_loop import run_turn
-
-        return run_turn(prompt, ctx, history, settings=settings, on_progress=on_progress)
-
-
     emit = on_progress or _noop
 
     if not getattr(settings, "search_grounding_enabled", False):
