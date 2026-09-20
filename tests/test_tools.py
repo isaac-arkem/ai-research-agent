@@ -215,3 +215,38 @@ def test_a_profile_matches_the_handle_however_it_is_written():
         out = run_tool("profile", {"handle": "@JaneDoe", "platform": "instagram"}, tc)
 
     assert "4,200 followers" in out
+
+
+def test_a_profile_says_who_the_handle_belongs_to():
+    """tiktok.com/@sarkodie is a real account with 30 followers whose display
+    name is "comfortagyeiwaa46" — not the musician. A stable number is not the
+    same as the right person, so the reply has to carry what tells them
+    apart: the display name, and whether the account is verified."""
+    tc = _tc("read @sarkodie")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value={"items": [{
+                   "text": "clip", "author_name": "sarkodie", "author_fans": 30,
+                   "author_nickname": "comfortagyeiwaa46", "author_verified": False,
+               }]}):
+        out = run_tool("profile", {"handle": "@sarkodie", "platform": "tiktok"}, tc)
+
+    assert 'display name "comfortagyeiwaa46"' in out
+    assert "not verified" in out
+    assert "30 followers" in out
+
+
+def test_a_profile_does_not_repeat_the_handle_as_a_display_name():
+    tc = _tc("read @janedoe")
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value={"items": [{
+                   "text": "clip", "author_name": "janedoe", "author_fans": 900000,
+                   "author_nickname": "JaneDoe", "author_verified": True,
+               }]}):
+        out = run_tool("profile", {"handle": "@janedoe", "platform": "tiktok"}, tc)
+
+    assert "display name" not in out
+    assert out.count("verified") == 1 and "not verified" not in out

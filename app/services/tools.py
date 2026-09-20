@@ -302,9 +302,23 @@ def profile(tc: ToolContext, handle: str, platform: str) -> str:
     for item in items[:8]:
         text = (item.get("text") or item.get("caption_snippet") or "").strip()
         lines.append(f"- {text[:160]}" if text else "- (no caption)")
+    # Who the handle actually belongs to, in the model's own words to read.
+    # tiktok.com/@sarkodie is a real account with 30 followers whose display
+    # name is "comfortagyeiwaa46" — not the musician. A stable number is not
+    # the same as the right person, and without the display name and the
+    # verified flag there is nothing in this reply that could tell them apart.
+    nickname = next(
+        (str(i.get("author_nickname") or "").strip() for i in items
+         if str(i.get("author_nickname") or "").strip()), ""
+    )
+    verified = any(i.get("author_verified") for i in items)
+
     head = f"@{handle} on {platform}: {len(items)} recent posts"
+    if nickname and nickname.lower() != handle.lower():
+        head += f', display name "{nickname}"'
     if followers:
         head += f", {int(followers):,} followers"
+    head += ", verified" if verified else ", not verified"
     if tags:
         head += f"\nhashtags they use: {', '.join('#' + t for t in tags[:12])}"
     return head + "\nrecent captions:\n" + "\n".join(lines)
