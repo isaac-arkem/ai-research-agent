@@ -3125,3 +3125,87 @@ def test_a_check_needs_a_platform_it_can_actually_look_at():
         assert check_handle("sarkodie", "youtube", settings=_settings()) is None
         assert check_handle("", "tiktok", settings=_settings()) is None
     prov.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# The router's rewrite is evidence too — a word list must not overrule it
+# --------------------------------------------------------------------------
+
+def test_a_comparison_the_word_list_misses_is_still_a_comparison():
+    """"creators in the same lane as @iamhamamat" is not in any word list, so
+    the gate said no, `subjects` survived, and _only_the_subjects filtered the
+    answer down to @iamhamamat HIMSELF — asked for people in his lane, you got
+    him back.
+
+    The router had already understood it: handed that sentence it rewrote the
+    topic to "similar to @iamhamamat", which the word list reads perfectly
+    well. The understanding was there and a regex that never saw it won."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search",'
+              '"topic":"beauty creators similar to @iamhamamat on Instagram",'
+              '"answer":"creators","subjects":["iamhamamat"]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same content style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators in the same lane as @iamhamamat on instagram",
+            _ctx(), settings=_settings())
+
+    # It is a comparison, so it asks what "similar" means instead of scraping.
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+    assert web.comparison_bases
+
+
+def test_a_request_to_look_at_one_account_is_not_turned_into_a_comparison():
+    """The union can only turn a no into a yes, which is exactly why the
+    no side has to be checked. "scrape @iamhamamat's posts" is about him and
+    nobody else, and no rewrite may make it mean the opposite."""
+    routed = ('{"action":"search",'
+              '"topic":"@iamhamamat Instagram posts","answer":"creators",'
+              '"subjects":["iamhamamat"]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering") as bases:
+        web = gather_web_context(
+            "scrape @iamhamamat's instagram posts", _ctx(), settings=_settings())
+
+    # Never reaches the comparison branch at all.
+    bases.assert_not_called()
+    assert web.action != "ask" or web.missing != ["basis"]
+
+
+def test_the_platform_can_be_named_in_words_the_list_does_not_have():
+    """"on the gram" is Instagram to everyone except a word list. Asking which
+    platform when they just said it is what makes the thing feel deaf."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search",'
+              '"topic":"beauty creators similar to @iamhamamat on Instagram",'
+              '"answer":"creators","subjects":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same content style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators similar to @iamhamamat on the gram",
+            _ctx(), settings=_settings())
+
+    # The basis question, NOT "which platform is this?"
+    assert web.missing == ["basis"]
+
+
+def test_a_platform_nobody_named_is_still_asked_for():
+    """"short form video" is TikTok or Reels and the operator has to say
+    which. The union must not invent an answer to a real question."""
+    routed = ('{"action":"search",'
+              '"topic":"beauty creators similar to @iamhamamat on short form video",'
+              '"answer":"creators","subjects":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        web = gather_web_context(
+            "beauty creators similar to @iamhamamat on short form video",
+            _ctx(), settings=_settings())
+
+    assert web.action == "ask"
+    assert web.missing == ["platform"]

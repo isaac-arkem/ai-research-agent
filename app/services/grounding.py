@@ -179,6 +179,15 @@ A QUESTION ABOUT SOMETHING MISSING IS A SEARCH FOR THAT THING. "Why is Sarkodie 
           NOT the original topic re-run — that returns the same list that
           already omitted him, and answers nothing.
 
+SAY "SIMILAR TO @x" WHEN THEY ARE ASKING FOR PEOPLE LIKE SOMEBODY, WHATEVER WORDS THEY USED. "in the same lane as", "cut from the same cloth as", "in the mould of", "who gives the same energy as", "that give off @x vibes", "his contemporaries", "who else does what @x does" all mean one thing: find OTHER people, @x is the yardstick. Write the topic in the plain form so it cannot be mistaken for a request to go and look at @x.
+
+  now:    "beauty creators that give off @iamhamamat vibes on instagram"
+  topic:  "beauty creators similar to @iamhamamat on Instagram"
+
+This is not a style preference. Downstream, "similar to" is what separates "find people LIKE this account" from "go and scrape this account", and the second answers the question with the very person they asked to move on from.
+
+A REQUEST TO LOOK AT ONE ACCOUNT IS NOT A COMPARISON. "get me details of @x", "scrape @x's posts", "what is @x posting" are about @x and nobody else. Do not write "similar to" into those.
+
 DROP A DESCRIPTOR THAT HAS STOPPED DISCRIMINATING. When a market has been chosen, a demographic word that describes most people in it selects nothing — and a search engine answers it with discourse ABOUT the demographic rather than a list of creators.
 
   before: "in what country can i get influencers that are dark skinned"
@@ -3072,8 +3081,27 @@ def gather_web_context(
     _earlier = [
         _content_of_turn(t) for t in (history or []) if _role_of_turn(t) == "user"
     ]
-    if accounts_are_references(prompt) or any(
-        accounts_are_references(t) for t in _earlier
+    # The router's rewrite counts as evidence, not just the operator's words.
+    #
+    # This gate decides whether @x is somebody to FIND PEOPLE LIKE or the
+    # person to go and scrape, and it decided it from a word list. "creators
+    # in the same lane as @iamhamamat" is not in that list, so the gate said
+    # no, `subjects` survived, and _only_the_subjects filtered the answer down
+    # to @iamhamamat himself — asked for people in his lane, you got him.
+    #
+    # The router had already understood it. Handed that same sentence it
+    # rewrote the topic to "beauty creators SIMILAR TO @iamhamamat on
+    # Instagram" — a phrasing the word list reads perfectly well. The
+    # understanding was there and a regex that never saw it overruled it.
+    #
+    # Added to the evidence rather than replacing it: a rewrite can drop a
+    # word as easily as add one, and every phrasing that worked before still
+    # has to work. It can only turn a no into a yes.
+    _topic = (routed.get("topic") or "").strip()
+    if (
+        accounts_are_references(prompt)
+        or (_topic and accounts_are_references(_topic))
+        or any(accounts_are_references(t) for t in _earlier)
     ):
         seen_seed = set()
         seeds = []
@@ -3140,8 +3168,11 @@ def gather_web_context(
         if seeds and not extract_handles(prompt, *_earlier):
             resolved = resolve_seed(seeds[0], settings=settings)
 
+        # Same reasoning, same union. "on the gram" is not in the platform
+        # word list either, and asking which platform when they just said it
+        # is the kind of question that makes the thing feel deaf.
         said_platform = bool(resolved) or operator_named_platform(
-            prompt, *[
+            prompt, *([_topic] if _topic else []), *[
                 _content_of_turn(t) for t in (history or [])
                 if _role_of_turn(t) == "user"
             ]
