@@ -2551,10 +2551,13 @@ def test_a_bare_name_resolves_to_an_account_and_settles_the_platform():
 
 
 def test_a_name_that_does_not_match_the_handle_stays_unresolved():
-    """Measured, a looser rule resolved Kevin Hart to @imkevinhart, Bill Burr
-    to @wilfredburr and Shatta Wale to @shattawaleking. Naming the wrong
-    person back with confidence is worse than admitting we could not work it
-    out — unresolved just asks which platform, as it did before."""
+    """The free pass will not guess. A handle that is not the name is not
+    accepted on the strength of a page title, because a fan account is titled
+    after the person it follows — rebuilt strictly, that rule still resolved
+    Bill Burr to @billburrbits, a clips account.
+
+    With nothing to weigh the rivals against, unresolved is the answer, and
+    unresolved just asks which platform, as it did before."""
     from app.services.grounding import resolve_seed
 
     provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
@@ -2562,7 +2565,137 @@ def test_a_name_that_does_not_match_the_handle_stays_unresolved():
         ("https://www.instagram.com/kevinhartfans/", "Kevin Hart Fans"),
     ))
     with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        assert resolve_seed(
+            "Kevin Hart", settings=_settings(seed_verification_enabled=False)
+        ) is None
+
+
+# --------------------------------------------------------------------------
+# Weighing rivals — what a URL cannot say, the account can
+# --------------------------------------------------------------------------
+
+def _rivals_provider():
+    """What "Shatta Wale" actually returns: three handles, all with his name
+    in them, one of them a news page."""
+    return SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@shattawaleking", "TikTok - Make Your Day"),
+        ("https://www.tiktok.com/@shattawalenews", "Shatta Wale News"),
+        ("https://www.instagram.com/shattawalenima/", "SHATTA WALE"),
+    ))
+
+
+def _actor(*accounts):
+    """accounts: (handle, fans, verified) -> what the actor hands back."""
+    return {"items": [
+        {"text": "post", "author_name": h, "author_fans": f, "author_verified": v}
+        for h, f, v in accounts
+    ]}
+
+
+def test_the_verified_account_wins_when_a_url_cannot_say():
+    """@shattawaleking is verified with 5.2M and @shattawalenews has 555.
+    Nothing in either URL says which is him; the accounts say it plainly."""
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("shattawaleking", 5_200_000, True),
+                                   ("shattawalenews", 555, False))) as actor:
+        seed = resolve_seed("Shatta Wale", settings=_settings())
+
+    assert seed is not None
+    assert seed.handle == "shattawaleking" and seed.platform == "tiktok"
+    assert actor.call_count == 1                      # ONE run for all rivals
+    assert sorted(actor.call_args.kwargs["creators"]) == [
+        "shattawaleking", "shattawalenews",
+    ]
+
+
+def test_the_biggest_unverified_account_is_refused():
+    """The @billburrbits case. A clips account can out-follow the real person,
+    and naming it back with confidence is the failure this exists to stop."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@billburrbits", "Bill Burr (@billburrbits)"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("billburrbits", 900_000, False))):
+        assert resolve_seed("Bill Burr", settings=_settings()) is None
+
+
+def test_a_name_that_already_resolves_free_never_reaches_the_paid_check():
+    """Sarkodie, Stonebwoy, Khaby Lame and Black Sherif resolve on the handle
+    alone. They must go on costing nothing."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@stonebwoy", "STONEBWOY"),
+        ("https://www.tiktok.com/@stonebwoyfans", "fans"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        seed = resolve_seed("Stonebwoy", settings=_settings())
+
+    assert seed.handle == "stonebwoy"
+    actor.assert_not_called()
+
+
+def test_only_handles_carrying_the_name_are_paid_to_look_at():
+    """A search returns strangers. Weighing every one of them pays to look at
+    accounts nobody suggested."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@ataafelicia", "someone"),
+        ("https://www.tiktok.com/@heishotshot4", "someone else"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
         assert resolve_seed("Kevin Hart", settings=_settings()) is None
+
+    actor.assert_not_called()
+
+
+def test_no_token_means_an_honest_miss_not_a_crash():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config", return_value={}):
+        assert resolve_seed("Shatta Wale", settings=_settings()) is None
+
+
+def test_weighing_can_be_turned_off():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        assert resolve_seed(
+            "Shatta Wale", settings=_settings(seed_verification_enabled=False)
+        ) is None
+    actor.assert_not_called()
+
+
+def test_a_failed_actor_run_leaves_the_name_unresolved():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               side_effect=RuntimeError("apify down")):
+        assert resolve_seed("Shatta Wale", settings=_settings()) is None
 
 
 def test_posts_and_reels_are_not_accounts():

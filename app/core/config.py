@@ -150,6 +150,11 @@ class Settings(BaseSettings):
     # `apify_supported_countries` (see sql/002_apify_supported_countries.sql).
     apify_token: Optional[str] = None
     apify_tiktok_actor: str = "clockworks~tiktok-scraper"
+    # One Apify run to tell a real account from a fan account when the web
+    # search returns rivals it cannot separate. Only ever reached when the
+    # free name-to-handle match found nothing, so the names that already
+    # resolve cost nothing. Set false to go back to an honest miss instead.
+    seed_verification_enabled: bool = True
 
     # Optional — sensible defaults
     research_agent_model: str = "gpt-4o"

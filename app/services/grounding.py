@@ -1920,15 +1920,102 @@ def resolve_seed(
 
     # There was a second pass that read the page TITLE — an official profile
     # is titled "Kevin Hart (@kevinhart4real) - Instagram photos and videos",
-    # which carries both name and handle. It was removed after measurement:
-    # it resolved Kevin Hart to @imkevinhart, Bill Burr to @wilfredburr and
-    # Shatta Wale to @shattawaleking. Every one of those is confidently wrong,
-    # and naming the wrong person back to the operator is worse than saying we
-    # could not work it out — an unresolved name asks which platform, which is
-    # what happened before any of this existed.
+    # which carries both name and handle. It was removed after measurement,
+    # and it should stay removed: rebuilt strictly, requiring the title's own
+    # (@handle) to be the handle the URL points at, it still resolves Bill
+    # Burr to @billburrbits. A clips account calls itself "Bill Burr" because
+    # that is what it is about, so the title is forgeable and no amount of
+    # strictness fixes it.
+    #
+    # What cannot be forged is the account. Below, the rivals are weighed by
+    # what they actually are.
+    verified = _verify_seed(label, candidates, want, settings=settings)
+    if verified:
+        return verified
 
     logger.info("web grounding: %r did not resolve to an account", label)
     return None
+
+
+def _verify_seed(
+    label: str,
+    candidates: Sequence[tuple],
+    want: str,
+    *,
+    settings,
+) -> Optional[ResolvedSeed]:
+    """Weigh rival handles by looking at the accounts themselves.
+
+    The web search finds the right accounts and cannot rank them. "Shatta
+    Wale" returns @shattawaleking, @shattawalenima and @shattawalenews, and
+    nothing in a URL says which is him — one of those is a news page. Reading
+    the page title does not settle it either, because a fan account is titled
+    after the person it follows.
+
+    The accounts settle it in one actor run, because the actor takes a LIST of
+    profiles: @shattawaleking is verified with 5.2 million followers and
+    @shattawalenews has 555. Only reached when the free pass above found
+    nothing, so the names that already resolve — Sarkodie, Stonebwoy, Khaby
+    Lame, Black Sherif — still cost no money at all.
+
+    VERIFIED or nothing. Picking the biggest unverified account would hand
+    back @billburrbits with total confidence, and naming the wrong person is
+    worse than saying we could not work it out. An unresolved name asks which
+    platform, which is what happened before any of this existed.
+
+    TikTok only: the Instagram actor returns no follower count per post, so an
+    Instagram rival cannot be weighed against anything.
+    """
+    if not getattr(settings, "seed_verification_enabled", True):
+        return None
+    rivals = []
+    for platform, slug, _title in candidates:
+        if platform != "tiktok" or slug in rivals:
+            continue
+        # Plausible only: the name has to be IN the handle. Without this the
+        # check pays to look at every stranger the search happened to return.
+        if want and want in _norm_subject(slug):
+            rivals.append(slug)
+    if not rivals:
+        return None
+    token = (_engine_config(settings) or {}).get("APIFY_API_TOKEN")
+    if not token:
+        logger.info("web grounding: no Apify token, cannot weigh %s", rivals)
+        return None
+
+    from app.services.research.engine import apify_social
+
+    logger.info("web grounding: weighing %d rival handles for %r: %s",
+                len(rivals), label, rivals)
+    try:
+        raw = apify_social.search_tiktok_apify(
+            "", "", "", depth="quick", token=token, creators=rivals[:5],
+        )
+    except Exception as exc:
+        logger.warning("web grounding: could not weigh %s: %s", rivals, exc)
+        return None
+
+    best = None
+    for item in (raw or {}).get("items") or []:
+        slug = str(item.get("author_name") or "").strip().lstrip("@").lower()
+        if slug not in rivals or not item.get("author_verified"):
+            continue
+        fans = item.get("author_fans")
+        fans = float(fans) if isinstance(fans, (int, float)) and not isinstance(fans, bool) else 0.0
+        if best is None or fans > best[1]:
+            best = (slug, fans)
+    if not best:
+        logger.info("web grounding: none of %s is verified, so %r stays unresolved",
+                    rivals, label)
+        return None
+
+    logger.info("web grounding: %r resolves to @%s on tiktok "
+                "(verified, %d followers, beat %s)",
+                label, best[0], int(best[1]), [r for r in rivals if r != best[0]])
+    return ResolvedSeed(
+        name=label, handle=best[0], platform="tiktok",
+        url=profile_url(best[0], "tiktok"),
+    )
 
 
 @dataclass
