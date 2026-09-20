@@ -126,6 +126,14 @@ class Settings(BaseSettings):
     # Breadth is the thing that was wrong, so it is worth paying for.
     research_depth: str = "default"
 
+    # ── Tools ───────────────────────────────────────────────────────────
+    # Caps on what one turn may spend once the model, rather than a fixed
+    # pipeline, decides what to do. The model chooses WHAT; these choose what
+    # it may COST. Both are enforced inside the tools, so a prompt cannot talk
+    # its way past them.
+    tools_max_paid_calls: int = 2
+    tools_max_searches: int = 4
+
     # Apify — used only to refresh the geo-targetable country list at startup.
     # Without it, countries come from the Supabase table
     # `apify_supported_countries` (see sql/002_apify_supported_countries.sql).
