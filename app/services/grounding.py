@@ -96,7 +96,7 @@ TRIAGE_SYSTEM = """You route one turn of a social-listening research conversatio
 
 Return exactly one of these JSON shapes:
 
-{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "exclude_accounts": ["handles they asked NOT to be like, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>, "window_days": <number or null>, "rank_by": "followers|engagement_rate|null"}
+{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "exclude_accounts": ["handles they asked NOT to be like, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>, "window_days": <number or null>, "rank_by": "followers|engagement_rate|null", "hashtags": ["tags they typed themselves, without the #, or []"]}
 {"action": "ask", "question": "...", "missing": ["country"]}
 {"action": "respond", "reason": "..."}
 {"action": "plan", "reason": "..."}
@@ -202,6 +202,12 @@ Both sides of a "like @a but not like @b" are references: @b is still a yardstic
 "exclude_accounts" IS THE ONES THEY ASKED NOT TO BE LIKE. A subset of reference_accounts, never anything else. "like @a but not like @b" -> reference_accounts ["a","b"], exclude_accounts ["b"]. Empty when they only said who they DO want.
 
 An account is a reference even when they never used a comparison word. "the @iamhamamat of Kenya" is asking for somebody else entirely.
+
+"hashtags" IS THE TAGS THEY TYPED THEMSELVES.
+
+Only the ones in their message, exactly as written, with the # stripped. They went to the trouble of listing them, so all of them are used — a planner downstream guesses its own tags from the topic, and it kept three of the eight somebody had spelled out.
+
+Empty when they named none. Never add one they did not type: that is the planner's job and it is better at it than a guess made here.
 
 "window_days" IS HOW FAR BACK THEY ASKED YOU TO LOOK, IN DAYS.
 
@@ -648,6 +654,13 @@ def _route_once(
         "platform": lane if lane in ("instagram", "tiktok", "both") else None,
         "max_followers": _count("max_followers"),
         "min_followers": _count("min_followers"),
+        "hashtags": [
+            t for t in dict.fromkeys(
+                re.sub(r"[^A-Za-z0-9_]", "", str(raw or "").lstrip("#"))
+                for raw in (parsed.get("hashtags") or [])
+                if isinstance(parsed.get("hashtags"), list)
+            ) if len(t) > 1
+        ],
         "window_days": _count("window_days"),
         "rank_by": (
             str(parsed.get("rank_by") or "").strip().lower()
@@ -3171,6 +3184,7 @@ def _research_via_engine(
     limit: Optional[tuple] = None,
     window_days: Optional[int] = None,
     rank_by: Optional[str] = None,
+    typed_hashtags: Optional[Sequence[str]] = None,
 ) -> Optional[WebContext]:
     """Run the multi-source engine. None when it has nothing to offer.
 
@@ -3200,6 +3214,18 @@ def _research_via_engine(
         targets = orchestrator.resolve_targets(
             query.text, provider=client, model=model,
         )
+        # The tags the operator typed, ahead of anything guessed. They listed
+        # eight and the planner kept three of them, having re-derived its own
+        # list from the topic — the same mistake as re-deriving a handle they
+        # had already given exactly.
+        typed_tags = [t for t in (typed_hashtags or []) if t]
+        if typed_tags:
+            known = {t.lower() for t in typed_tags}
+            targets["hashtags"] = typed_tags + [
+                t for t in (targets.get("hashtags") or [])
+                if t and t.lower() not in known
+            ][:4]
+
         # Look, then hunt. The seeds' own tags go first: they are the only
         # evidence in the turn that came from the right person, and the
         # planner's are adjectives pulled out of the request.
@@ -3740,6 +3766,7 @@ def gather_web_context(
             exclude=routed.get("exclude_accounts") or [],
             window_days=routed.get("window_days"),
             rank_by=routed.get("rank_by"),
+            typed_hashtags=routed.get("hashtags") or [],
         )
         if engine_context is not None:
             return engine_context

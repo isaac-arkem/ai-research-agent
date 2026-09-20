@@ -3723,3 +3723,45 @@ def test_instagram_can_be_ranked_by_engagement_now():
         "engagement_rate")
 
     assert "9.0% engagement" in got[0].why
+
+
+def test_the_tags_the_operator_typed_are_all_used():
+    """Eight were listed and three were swept. The planner re-derives its own
+    tags from the topic, which is the same mistake as re-deriving a handle
+    somebody had already given exactly."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"skincare creators in the UK",'
+              '"answer":"creators","subjects":[],"platform":"instagram",'
+              '"hashtags":["skincare","cleanbeauty","glowingskin","beautytips",'
+              '"skincareroutine","selfcare","naturalskincare","skinhealth"]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("...", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert len(got["hashtags"]) == 8
+    assert got["hashtags"][0] == "skincare"
+    assert "skinhealth" in got["hashtags"]
+
+
+def test_a_tag_is_cleaned_but_never_invented():
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"t","answer":"creators","subjects":[],'
+              '"hashtags":["#Clean Beauty!","glowingskin","glowingskin","x",""]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("t", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert got["hashtags"] == ["CleanBeauty", "glowingskin"]   # deduped, stripped, no "x"
+
+
+def test_no_tags_typed_means_the_planner_decides_alone():
+    from app.services.grounding import _route_once
+
+    routed = '{"action":"search","topic":"t","answer":"creators","subjects":[]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("t", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert got["hashtags"] == []
