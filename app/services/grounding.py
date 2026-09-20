@@ -3230,10 +3230,19 @@ def _research_via_engine(
     creators = _within_follower_limit(creators, limit)
     # Last, because it is the only step that judges a creator against the
     # QUESTION rather than against a number. Ranking sorts and never drops.
+    # The bigger model, not the router's. This is the last judgement before
+    # the operator sees the list and it is a fine one — a photographer who
+    # shoots beautiful women, a brand that sells shea butter and a creator
+    # who talks about shea butter all read alike in one line of caption.
+    # Measured on the same 36 accounts with the same prompt: gpt-4o-mini
+    # left ten that did not belong, gpt-4o left five, and the price of that
+    # was one lash technician it judged too far from the seed. One call on
+    # thirty short lines, once a turn.
     creators = drop_irrelevant_creators(
         creators, prompt,
         openai_key=settings.openai_api_key,
-        model=settings.grounding_model,
+        model=(getattr(settings, "grounding_escalation_model", None)
+               or settings.grounding_model),
         timeout=float(getattr(settings, "search_timeout", 15.0)),
         seed_profile=seed_profile,
     )

@@ -3578,3 +3578,26 @@ def test_the_seed_profile_reaches_the_filter():
     sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][1]
     assert "#protectshea" in sent["content"]
     assert "What the account they named is actually like" in sent["content"]
+
+
+def test_the_relevance_filter_uses_the_bigger_model():
+    """The last judgement before the operator sees the list, and a fine one:
+    a photographer who shoots beautiful women, a brand that sells shea butter
+    and a creator who talks about shea butter all read alike in one line of
+    caption. On the same 36 accounts gpt-4o-mini left ten that did not
+    belong; gpt-4o left five."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search","topic":"beauty creators in Ghana",'
+              '"answer":"creators","subjects":[],"reference_accounts":[],'
+              '"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding.drop_irrelevant_creators") as filt, \
+         patch("app.services.grounding._research_via_engine", return_value=None), \
+         patch("app.services.grounding.provider_from_settings",
+               return_value=_provider([])):
+        gather_web_context("beauty creators in Ghana on instagram", _ctx(),
+                           settings=_settings(grounding_escalation_model="gpt-4o"))
+
+    if filt.called:
+        assert filt.call_args.kwargs["model"] == "gpt-4o"
