@@ -181,6 +181,15 @@ def _finish(tc: ToolContext, reply, next_step, WebContext, _trim, reason: str = 
     A turn that gathered nothing is a "respond": prose with no sources under
     it. A turn that searched is a review turn, so the sources show.
     """
+    if tc.creators:
+        from app.services.grounding import drop_irrelevant_creators
+
+        tc.creators = drop_irrelevant_creators(
+            tc.creators, tc.prompt,
+            openai_key=tc.settings.openai_api_key,
+            model=tc.settings.grounding_model,
+            timeout=float(getattr(tc.settings, "search_timeout", 15.0)),
+        )
     gathered = bool(tc.findings or tc.creators or tc.markets)
     if not reply:
         reply = ("I could not work that out." if not gathered

@@ -2772,3 +2772,74 @@ def test_an_open_field_question_escalates_however_the_answer_is_worded():
     assert not _answers_a_pending_field("anything", answered)
     assert not _answers_a_pending_field("anything", [])
     assert not _answers_a_pending_field("", pending)
+
+
+# ── is this what was asked for ───────────────────────────────────────
+
+
+def _c(name, handle, why):
+    from app.models.domain import Creator
+    return Creator(name=name, handle=handle, platform="tiktok", why=why)
+
+
+def test_the_filter_keeps_everything_when_it_cannot_justify_dropping():
+    """A creator wrongly dropped is invisible — the operator cannot see what
+    is not there, while an irrelevant one they can see and ignore."""
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("A", "a", "1,000 followers"), _c("B", "b", "2,000 followers")]
+    with patch("app.services.grounding.OpenAI", return_value=_triage('{"drop": []}')):
+        assert filt(rows, "armenian comedians", openai_key="sk") == rows
+    # A model that wants everything gone is wrong, not decisive.
+    everything = '{"drop": [{"n": 1, "why": "x"}, {"n": 2, "why": "x"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(everything)):
+        assert filt(rows, "armenian comedians", openai_key="sk") == rows
+    # ...and a failure costs the filtering, never the turn.
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")):
+        assert filt(rows, "x", openai_key="sk") == rows
+
+
+def test_the_filter_drops_only_what_the_model_named():
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("Radio", "power106la", "LA morning crew"),
+            _c("Comic", "hay_humour", "armenian jokes"),
+            _c("News", "sarkupdatestv", "sarkodie news")]
+    payload = '{"drop": [{"n": 1, "why": "a radio station"}, {"n": 3, "why": "ghanaian news"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(payload)):
+        kept = filt(rows, "armenian comedians on tiktok", openai_key="sk")
+    assert [c.handle for c in kept] == ["hay_humour"]
+
+
+def test_an_out_of_range_index_cannot_drop_the_wrong_person():
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("A", "a", "x"), _c("B", "b", "y")]
+    payload = '{"drop": [{"n": 9, "why": "nonsense"}, {"n": "two", "why": "nonsense"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(payload)):
+        assert filt(rows, "x", openai_key="sk") == rows
+
+
+def test_a_scraped_creator_carries_what_it_posts():
+    """Without a caption a creator record says only how many followers it has,
+    which is nothing to judge relevance on: shown "925,600 followers", a
+    filter cannot tell a Los Angeles radio station from a comedian."""
+    from app.services.grounding import creators_from_post_authors
+    from app.services.research.engine import schema
+
+    item = schema.SourceItem(
+        item_id="i", source="tiktok", title="", body="Tune in weekdays 6am",
+        url="u", author="power106la", container="", published_at="",
+        date_confidence="", engagement={}, relevance_hint="", why_relevant="",
+        snippet="", metadata={"author_fans": 925600, "hashtags": ["radio"]},
+    )
+    cand = schema.Candidate(
+        candidate_id="c", item_id="i", source="tiktok", title="", url="u",
+        snippet="", subquery_labels=[], native_ranks={}, local_relevance=0.0,
+        freshness=0.0, engagement={}, source_quality=0.0, rrf_score=0.0,
+    )
+    cand.source_items = [item]
+
+    creator = creators_from_post_authors([cand])[0]
+    assert "925,600 followers" in creator.why
+    assert "Tune in weekdays 6am" in creator.why

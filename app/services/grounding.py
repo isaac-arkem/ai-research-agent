@@ -2135,6 +2135,91 @@ def _within_follower_limit(creators: List[Creator], limit) -> List[Creator]:
     return kept
 
 
+RELEVANCE_SYSTEM = """You are shown a question an operator asked, and a list of accounts that came back. Say which ones are not a plausible answer to that question.
+
+The list is gathered by sweeping a hashtag, so it contains whoever posted under the tag: radio stations, blogs, fan pages, shops, and people from another country entirely. Asked for Armenian comedians it returned a Los Angeles radio station. Asked for creators like a Ghanaian rapper it returned a dance account and a TV channel.
+
+Return JSON: {"drop": [{"n": <number>, "why": "<a few words>"}]}
+
+DROP ONLY WHAT YOU CAN JUSTIFY. A blog about a subject is not a creator in it. A radio station is not a comedian. A shop is not a musician. Someone plainly from a different country, when the question named one, does not belong.
+
+KEEP ANYTHING YOU ARE UNSURE OF. A name and one line of context is thin evidence, and a creator wrongly dropped is invisible to the operator — they cannot see what is not there, while an irrelevant one they can see and ignore. When the line says nothing either way, keep it.
+
+KEEP SMALL ACCOUNTS. Few followers is not irrelevance. Unless the operator asked for size, an account with two hundred followers doing exactly the right thing is an answer.
+
+JUDGE AGAINST THE QUESTION, NOT AGAINST QUALITY. You are not ranking. The only test is whether someone reading the question would say "that is not what I asked for"."""
+
+
+def drop_irrelevant_creators(
+    creators: List[Creator],
+    question: str,
+    *,
+    openai_key: str,
+    model: str = "gpt-4o-mini",
+    timeout: float = 20.0,
+) -> List[Creator]:
+    """Remove the ones that do not answer the question that was asked.
+
+    Ranking sorts and never drops — rerank scores engagement, recency and
+    corroboration, which are facts about a POST, not about whether the person
+    answers the question. A Los Angeles radio station posting under
+    #armeniancomedy scores perfectly well on all three.
+
+    Same asymmetry as the follower limit: it removes only what it can
+    justify, and anything uncertain stays. A filter that quietly deletes good
+    creators is worse than one that leaves a few bad ones, because the
+    operator can see the bad ones.
+    """
+    if len(creators) < 2:
+        return creators
+    listed = "\n".join(
+        f"{i}. {c.name or '?'}"
+        + (f" (@{c.handle})" if c.handle else "")
+        + (f" — {c.why}" if c.why else "")
+        for i, c in enumerate(creators, start=1)
+    )
+    try:
+        client = OpenAI(api_key=openai_key, timeout=timeout)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": RELEVANCE_SYSTEM},
+                {"role": "user", "content": f"The operator asked: {question}\n\nAccounts:\n{listed}"},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        parsed = extract_json_object(response.choices[0].message.content or "")
+    except Exception as exc:
+        logger.warning("web grounding: relevance filter failed: %s", exc)
+        return creators
+
+    rows = parsed.get("drop")
+    if not isinstance(rows, list):
+        return creators
+    cut = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        n = row.get("n")
+        if isinstance(n, int) and 1 <= n <= len(creators):
+            cut[n - 1] = str(row.get("why") or "").strip()[:60]
+    if not cut:
+        return creators
+
+    kept = [c for i, c in enumerate(creators) if i not in cut]
+    if not kept:
+        # Emptying the answer is never the right call on this evidence.
+        logger.info("web grounding: relevance filter wanted to drop everything — keeping all")
+        return creators
+    logger.info(
+        "web grounding: dropped %d of %d as not what was asked for: %s",
+        len(cut), len(creators),
+        [f"{creators[i].handle or creators[i].name}: {why}" for i, why in list(cut.items())[:5]],
+    )
+    return kept
+
+
 def _drop_the_seeds(
     creators: List[Creator], seeds: Optional[Sequence[str]]
 ) -> List[Creator]:
@@ -2264,6 +2349,21 @@ def creators_from_post_authors(candidates) -> List[Creator]:
             why.append(f"{int(fans):,} followers on {source}")
         if verified:
             why.append("verified")
+        # What the account actually posts. Without this a creator record says
+        # only how many followers it has, which is nothing to judge relevance
+        # on: asked to drop the accounts that were not Armenian comedians, a
+        # filter shown "925,600 followers on tiktok" cannot tell a Los Angeles
+        # radio station from a comedian, and correctly keeps both.
+        #
+        # It is also what the operator sees, in place of "posts in this niche".
+        caption = str(
+            getattr(item, "body", "") or getattr(item, "snippet", "") or ""
+        ).strip().replace("\n", " ")
+        tags = [t for t in (meta.get("hashtags") or []) if t][:4]
+        if caption:
+            why.append(f"\u201c{caption[:110]}\u201d")
+        elif tags:
+            why.append(" ".join("#" + t for t in tags))
         if not why:
             metrics = " ".join(
                 f"{name} {int(value):,}"
@@ -2595,6 +2695,14 @@ def _research_via_engine(
                 if _role_of_turn(t) == "user"
             ])
         ),
+    )
+    # Last, because it is the only step that judges a creator against the
+    # QUESTION rather than against a number. Ranking sorts and never drops.
+    creators = drop_irrelevant_creators(
+        creators, prompt,
+        openai_key=settings.openai_api_key,
+        model=settings.grounding_model,
+        timeout=float(getattr(settings, "search_timeout", 15.0)),
     )
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
