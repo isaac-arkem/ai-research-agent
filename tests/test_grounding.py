@@ -3638,11 +3638,11 @@ def test_an_order_nobody_asked_for_is_not_invented():
     assert got["rank_by"] is None
 
 
-def _candidate(handle, fans, likes, source="tiktok"):
+def _candidate(handle, fans, likes, source="tiktok", views=0):
     from types import SimpleNamespace
     item = SimpleNamespace(
         source=source, author=handle, url=f"https://x/{handle}", title="", body="",
-        snippet="", engagement={"likes": likes},
+        snippet="", engagement={"likes": likes, "views": views},
         metadata={"author_fans": fans, "author_verified": False,
                   "author_nickname": handle, "hashtags": []},
     )
@@ -3679,3 +3679,16 @@ def test_a_rate_needs_both_numbers_and_is_never_guessed():
     got = creators_from_post_authors(cands, "engagement_rate")
 
     assert got and "engagement" not in got[0].why
+
+
+def test_views_are_reach_and_do_not_count_as_engagement():
+    """Summing everything put a post with 500,000 views, 20,000 likes and
+    100,000 followers at a 522% "engagement rate". Views dwarf the rest and
+    views are not something anybody chose to do. The same post is 22%."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors(
+        [_candidate("a", 100_000, 20_000, views=500_000)], "engagement_rate")
+
+    assert "20.0% engagement" in got[0].why
+    assert "522" not in got[0].why

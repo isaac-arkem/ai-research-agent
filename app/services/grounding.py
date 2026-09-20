@@ -2679,8 +2679,18 @@ def creators_from_post_authors(
         # Needs BOTH numbers. Instagram returns no follower count, so a rate
         # cannot be computed there and those keep their audience ranking
         # rather than being handed a made-up one.
-        if rank_by == "engagement_rate" and fans and fans > 0 and post_total > 0:
-            rate = post_total / fans
+        # Interactions over audience. NOT post_total, which includes views:
+        # a TikTok with 500,000 views, 20,000 likes and 100,000 followers came
+        # out at 522%, because views dwarf everything and views are reach, not
+        # engagement. Likes, comments and shares are the things somebody chose
+        # to do. The same post reads 22%.
+        acted = sum(
+            float(v) for k, v in engagement.items()
+            if k != "views" and isinstance(v, (int, float))
+            and not isinstance(v, bool) and v > 0
+        )
+        if rank_by == "engagement_rate" and fans and fans > 0 and acted > 0:
+            rate = acted / fans
             rank = rate
             engagement_rate = rate
         else:
