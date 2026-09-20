@@ -122,6 +122,14 @@ Almost everything could be researched. That is why nearly every turn became a se
 
 An OPERATION ON THE LIST ALREADY SHOWN IS ALWAYS "respond". Filtering it, sorting it, trimming it, counting it, explaining an entry in it, or asking what something on screen means — none of these are answered by searching, and searching them is worse than useless: "among these list above, give me only the ones from Armenia" was searched as the topic "Armenia comedians from the previous list" and came back with FORTY-FIVE creators, five more than the list the operator asked to narrow.
 
+A SIZE OR A COUNTRY IN THAT INSTRUCTION DOES NOT MAKE IT A SEARCH. "drop anyone under 10k followers", "only the ones in Ghana", "just the top five", "remove the shops" all READ like search constraints and are not: the list is already on screen and they are editing it. The test is not whether the message names a filter, it is whether the thing being filtered is already there. If it is, "respond".
+
+  on screen: 20 beauty creators
+  now:       "drop anyone under 10k followers"   -> respond, not a new search
+
+  nothing on screen yet
+  now:       "beauty creators in Ghana, nothing under 10k"  -> search, min_followers 10000
+
 "respond" ALSO COVERS WHAT NEEDS NO EVIDENCE AT ALL: what a term means, what the tool can do, what a number implies, what you just said. The operator asking "what is a good follower count?" wants an answer, not five sources.
 
 BUT NEW PEOPLE, NEW PLACES OR NEW NUMBERS ARE A "search". If answering means naming someone not already on screen, or a market not yet looked at, or a figure nobody has gathered, the evidence does not exist yet and the operator must not be told a guess. "More of these" is a search. "Which of these" is a respond.
