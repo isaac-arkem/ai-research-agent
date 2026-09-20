@@ -104,7 +104,9 @@ def test_reading_a_named_account_does_not_need_a_named_platform():
     them to also name the platform would demand something more general than
     what they already gave."""
     tc = _tc("creators like @janedoe")          # no platform anywhere
-    with patch("app.services.research.engine.apify_social.search_tiktok_apify",
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
                return_value={"items": [{"text": "a post", "author_fans": 1000}]}) as actor:
         out = run_tool("profile", {"handle": "@janedoe", "platform": "tiktok"}, tc)
 
@@ -118,7 +120,9 @@ def test_reading_a_named_account_does_not_need_a_named_platform():
 
 def test_profile_respects_the_same_budget():
     tc = _tc("creators like @janedoe", tools_max_paid_calls=1)
-    with patch("app.services.research.engine.apify_social.search_tiktok_apify",
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
                return_value={"items": [{"text": "x"}]}) as actor:
         run_tool("profile", {"handle": "a", "platform": "tiktok"}, tc)
         out = run_tool("profile", {"handle": "b", "platform": "tiktok"}, tc)
@@ -128,7 +132,9 @@ def test_profile_respects_the_same_budget():
 
 def test_an_empty_profile_says_why_rather_than_pretending():
     tc = _tc("creators like @ghost")
-    with patch("app.services.research.engine.apify_social.search_tiktok_apify",
+    with patch("app.services.tools.orchestrator_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
                return_value={"items": []}):
         out = run_tool("profile", {"handle": "ghost", "platform": "tiktok"}, tc)
     assert "no posts" in out and ("private" in out or "misspelled" in out)
