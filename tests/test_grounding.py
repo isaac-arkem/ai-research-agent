@@ -3209,3 +3209,100 @@ def test_a_platform_nobody_named_is_still_asked_for():
 
     assert web.action == "ask"
     assert web.missing == ["platform"]
+
+
+# --------------------------------------------------------------------------
+# The model says what the operator meant; code acts on it
+# --------------------------------------------------------------------------
+
+def test_the_router_says_which_accounts_are_the_yardstick():
+    """No word list can hold every way of saying "find others like this one".
+    "who scratch the same itch as @x", "@x's understudies", "the Kenyan answer
+    to @x", "i'm bored of @x, who else is out there" — every one of those
+    returned @x HIMSELF, because the phrase was not in the list so the handle
+    was read as the target.
+
+    The model decides now and says so in the response. There is no vocabulary
+    left to miss."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search","topic":"beauty creators on Instagram",'
+              '"answer":"creators","subjects":[],'
+              '"reference_accounts":["iamhamamat"],"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same content style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators who scratch the same itch as @iamhamamat on the gram",
+            _ctx(), settings=_settings())
+
+    # A comparison: it asks what "similar" means rather than scraping him.
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+
+
+def test_no_references_means_no_comparison_however_it_is_phrased():
+    """The converse has to hold or the fix just makes the opposite mistake.
+    "scrape @x's posts" is about @x and nobody else."""
+    routed = ('{"action":"search","topic":"@iamhamamat Instagram posts",'
+              '"answer":"creators","subjects":["iamhamamat"],'
+              '"reference_accounts":[],"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering") as bases:
+        gather_web_context("scrape @iamhamamat's instagram posts",
+                           _ctx(), settings=_settings())
+
+    bases.assert_not_called()
+
+
+def test_the_router_names_the_platform_in_whatever_words_it_was_given():
+    """"on the gram" is Instagram to everyone except a word list."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search","topic":"beauty creators","answer":"creators",'
+              '"subjects":[],"reference_accounts":["iamhamamat"],'
+              '"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators occupying @iamhamamat's space on the gram",
+            _ctx(), settings=_settings())
+
+    assert web.missing == ["basis"]        # not ["platform"]
+
+
+def test_a_platform_the_operator_did_not_name_is_still_asked_for():
+    """"on short form video" is TikTok or Reels. The model returns null and
+    the question gets asked, which is right — only they know."""
+    routed = ('{"action":"search","topic":"beauty creators","answer":"creators",'
+              '"subjects":[],"reference_accounts":["iamhamamat"],'
+              '"platform":null}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        web = gather_web_context(
+            "beauty creators like @iamhamamat on short form video",
+            _ctx(), settings=_settings())
+
+    assert web.action == "ask"
+    assert web.missing == ["platform"]
+
+
+def test_a_router_that_says_nothing_falls_back_to_the_word_lists():
+    """An EARLIER message was routed on its own turn and its judgement is not
+    in this response. The lists stay for those; they just stop deciding what
+    the model has already decided."""
+    routed = ('{"action":"search","topic":"beauty creators","answer":"creators",'
+              '"subjects":[]}')          # no reference_accounts at all
+    from app.models.domain import ComparisonBasis
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators similar to @iamhamamat on instagram",
+            _ctx(), settings=_settings())
+
+    assert web.missing == ["basis"]       # the old path still works

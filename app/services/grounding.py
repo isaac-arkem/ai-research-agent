@@ -96,7 +96,7 @@ TRIAGE_SYSTEM = """You route one turn of a social-listening research conversatio
 
 Return exactly one of these JSON shapes:
 
-{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"]}
+{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "platform": "instagram|tiktok|both|null"}
 {"action": "ask", "question": "...", "missing": ["country"]}
 {"action": "respond", "reason": "..."}
 {"action": "plan", "reason": "..."}
@@ -178,6 +178,22 @@ A QUESTION ABOUT SOMETHING MISSING IS A SEARCH FOR THAT THING. "Why is Sarkodie 
   topic:  "Sarkodie Ghana music artist TikTok Instagram"
           NOT the original topic re-run — that returns the same list that
           already omitted him, and answers nothing.
+
+"reference_accounts" IS THE ACCOUNTS THEY ARE MEASURING AGAINST, NOT THE ONES THEY WANT.
+
+This is the difference between "go and look at @x" and "find OTHER people, @x is the example". Nobody can list the ways people say the second one — "in the same lane as", "cut from the same cloth as", "in the mould of", "who gives the same energy as", "that give off @x vibes", "his contemporaries", "who else does what @x does", "the @x of Kenya" — so do not try to match words. Decide what they MEAN and put the yardstick handles here.
+
+  "beauty creators in the same lane as @iamhamamat"   -> reference_accounts: ["iamhamamat"]
+  "find creators who give off @iamhamamat vibes"      -> reference_accounts: ["iamhamamat"]
+  "find beauty creators like @a but not like @b"      -> reference_accounts: ["a", "b"]
+  "get me details of @iamhamamat"                     -> reference_accounts: []
+  "scrape @iamhamamat's posts"                        -> reference_accounts: []
+
+Both sides of a "like @a but not like @b" are references: @b is still a yardstick, and neither is the answer. Which one is the negative belongs in the topic, in plain words, not here.
+
+An account is a reference even when they never used a comparison word. "the @iamhamamat of Kenya" is asking for somebody else entirely.
+
+"platform" IS WHICH LANE THEY NAMED, HOWEVER THEY NAMED IT. "on the gram", "insta", "IG", "reels" are Instagram. "tiktok", "TT" are TikTok. "on short form video" and "on the app" name NOTHING — that is genuinely TikTok or Reels and only they know, so return null and let them be asked. null when they did not say.
 
 SAY "SIMILAR TO @x" WHEN THEY ARE ASKING FOR PEOPLE LIKE SOMEBODY, WHATEVER WORDS THEY USED. "in the same lane as", "cut from the same cloth as", "in the mould of", "who gives the same energy as", "that give off @x vibes", "his contemporaries", "who else does what @x does" all mean one thing: find OTHER people, @x is the yardstick. Write the topic in the plain form so it cannot be mistaken for a request to go and look at @x.
 
@@ -546,6 +562,20 @@ def _route_once(
         if name.lower() in ("", "null", "none", "n/a") or name in subjects:
             continue
         subjects.append(name)
+    # The accounts offered as a yardstick rather than as the target. The
+    # model says which; nothing here tries to work it out from the words.
+    raw_refs = parsed.get("reference_accounts")
+    if isinstance(raw_refs, str):
+        raw_refs = [raw_refs]
+    references: List[str] = []
+    for handle in raw_refs if isinstance(raw_refs, list) else []:
+        handle = str(handle or "").strip().lstrip("@")
+        if handle.lower() in ("", "null", "none", "n/a") or handle in references:
+            continue
+        references.append(handle)
+    # Which lane they named, in whatever words. "null" when they did not say,
+    # so a real question still gets asked rather than a lane being guessed.
+    lane = str(parsed.get("platform") or "").strip().lower()
     return {
         "action": "search",
         "topic": topic,
@@ -553,6 +583,8 @@ def _route_once(
         "window": window if window in WINDOWS else None,
         "answer": answer if answer in ANSWER_SHAPES else "overview",
         "subjects": subjects,
+        "reference_accounts": references,
+        "platform": lane if lane in ("instagram", "tiktok", "both") else None,
     }
 
 
@@ -3098,14 +3130,37 @@ def gather_web_context(
     # word as easily as add one, and every phrasing that worked before still
     # has to work. It can only turn a no into a yes.
     _topic = (routed.get("topic") or "").strip()
+    # The router SAYS which accounts are the yardstick. It no longer has to be
+    # inferred from whether the operator happened to use a word we listed.
+    #
+    # Nobody can enumerate the ways people say "find others like this one" —
+    # "in the same lane as", "cut from the same cloth as", "who gives the same
+    # energy as", "the @x of Kenya". Every one of those returned @x HIMSELF,
+    # because the word list did not have the phrase and so decided the handle
+    # was the target rather than the example.
+    #
+    # Asking the model to normalise its rewrite to "similar to" worked, but
+    # only by making it produce a magic phrase for a regex to find again —
+    # understanding laundered through a string and re-derived. One word out of
+    # place and the failure comes back silently.
+    _referenced = [
+        str(h).strip().lstrip("@")
+        for h in (routed.get("reference_accounts") or [])
+        if str(h).strip().lstrip("@")
+    ]
+    # The word lists stay, for the turns the router cannot speak for: an
+    # EARLIER message in the thread was routed on its own turn and its
+    # judgement is not in this response. They no longer decide anything the
+    # model has already decided.
     if (
-        accounts_are_references(prompt)
+        _referenced
+        or accounts_are_references(prompt)
         or (_topic and accounts_are_references(_topic))
         or any(accounts_are_references(t) for t in _earlier)
     ):
         seen_seed = set()
         seeds = []
-        for name in list(subjects) + extract_handles(prompt):
+        for name in list(_referenced) + list(subjects) + extract_handles(prompt):
             key = name.lstrip("@").strip().casefold()
             if key and key not in seen_seed:
                 seen_seed.add(key)
@@ -3168,14 +3223,22 @@ def gather_web_context(
         if seeds and not extract_handles(prompt, *_earlier):
             resolved = resolve_seed(seeds[0], settings=settings)
 
-        # Same reasoning, same union. "on the gram" is not in the platform
-        # word list either, and asking which platform when they just said it
-        # is the kind of question that makes the thing feel deaf.
-        said_platform = bool(resolved) or operator_named_platform(
-            prompt, *([_topic] if _topic else []), *[
-                _content_of_turn(t) for t in (history or [])
-                if _role_of_turn(t) == "user"
-            ]
+        # Same again: the router NAMES the platform, in whatever words it was
+        # given. "on the gram" is Instagram to everyone except a word list,
+        # and asking which platform when they just said it is what makes the
+        # thing feel deaf. null when they genuinely did not say — "on short
+        # form video" is TikTok or Reels and only they know — so a real
+        # question still gets asked.
+        _named_lane = str(routed.get("platform") or "").strip().lower()
+        said_platform = (
+            bool(resolved)
+            or _named_lane in ("instagram", "tiktok", "both")
+            or operator_named_platform(
+                prompt, *([_topic] if _topic else []), *[
+                    _content_of_turn(t) for t in (history or [])
+                    if _role_of_turn(t) == "user"
+                ]
+            )
         )
         if not said_platform:
             logger.info("web grounding: comparison with no platform — asking which lane")
