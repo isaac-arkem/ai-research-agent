@@ -2864,16 +2864,64 @@ def _plan_context_for(answer: str, text: str) -> str:
     return _PLAN_CONTEXT.get(answer, "")
 
 
-# Filler. Every account posts these and they describe nobody: a sweep of
-# #explore or #beauty returns the platform. Sorting seed tags by how often
-# they are used puts them FIRST, which is how "creators like @iamhamamat"
-# came back with a Maruti Suzuki tagged #blackbeauty, two dogs, and a foggy
-# morning in Dartmoor.
-_FILLER_TAGS = GENERIC_TAGS | {
-    "creator", "creators", "contentcreator", "contentcreators", "influencer",
-    "influencers", "model", "style", "fashion", "lifestyle", "picoftheday",
-    "instagood", "beautiful", "pretty", "girl", "woman", "women",
-}
+SEED_TAG_SYSTEM = """You are shown the hashtags an account posts under, and the request somebody made. Say which of those tags are worth searching to find OTHER accounts like this one.
+
+A tag is worth searching when somebody else using it is likely to be the same KIND of account. A tag is not worth searching when it is reach — a label anyone on the platform attaches to anything to be seen — because sweeping it returns the platform rather than a peer.
+
+Return JSON: {"sweep": ["tag", ...]} using only tags from the list, spelled exactly as given.
+
+JUDGE THE TAG IN THIS REQUEST, NOT IN GENERAL. There is no list of bad words. The same tag can be either: #fashion is reach under "find me fashion creators" because every fashion account has it and it selects nobody, and it is worth searching under "find me creators like this potter" because a potter posting it says something. Ask what the tag would NARROW to, given what was asked.
+
+A TAG THAT ONLY REPEATS THE REQUEST NARROWS TO NOTHING. The search already covers the words in the question. If they asked for beauty creators, #beauty finds every beauty account on the platform, which is where we started.
+
+RETURN FEW. Two or three tags that really place this account beat ten that merely surround it, and one bad tag pulls in thousands of strangers — a sweep of reach tags returned a Maruti Suzuki, two dogs and a nail salon for "creators like @iamhamamat". An empty list is a fine answer when the account only posts reach tags."""
+
+
+def _tags_worth_sweeping(
+    tags: List[str], handles: Sequence[str], topic: str, *, settings
+) -> List[str]:
+    """Which of the seed's tags would find a peer, rather than the platform.
+
+    This was a word list. It is not a thing a word list can know: #fashion is
+    reach under "find me fashion creators" and a real signal under "find me
+    creators like this potter", and the same is true of every word anybody
+    would think to put in such a list. Mine had "model", "style", "woman" in
+    it, which are exactly the tags a fashion seed lives on.
+
+    Empty on any failure, which falls back to the planner's tags — the
+    behaviour before any of this existed.
+    """
+    if not tags:
+        return []
+    try:
+        client = OpenAI(api_key=settings.openai_api_key)
+        response = client.chat.completions.create(
+            model=getattr(settings, "grounding_model", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": SEED_TAG_SYSTEM},
+                {"role": "user", "content": (
+                    f"The operator asked: {topic}\n\n"
+                    f"Tags posted by {', '.join('@' + h for h in handles)}:\n"
+                    + "\n".join("- " + t for t in tags)
+                )},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+            timeout=float(getattr(settings, "search_timeout", 15.0)),
+        )
+        parsed = extract_json_object(response.choices[0].message.content or "")
+    except Exception as exc:
+        logger.warning("web grounding: could not weigh the seed tags: %s", exc)
+        return []
+
+    allowed = {t.lower(): t for t in tags}
+    kept = []
+    for raw in (parsed or {}).get("sweep") or []:
+        tag = allowed.get(str(raw or "").lstrip("#").strip().lower())
+        if tag and tag not in kept:
+            kept.append(tag)
+    logger.info("web grounding: of %s, worth sweeping: %s", tags, kept or "none")
+    return kept
 
 
 def seed_signals(
@@ -2944,18 +2992,14 @@ def seed_signals(
                 key = tag.lower()
                 counts[key] = counts.get(key, 0) + 1
 
-    # A tag earns its place by saying something the request did not already
-    # say. #beauty on "find beauty creators" adds nothing and sweeps everyone
-    # who has ever typed it; #thingstodoinaccra is the reason to look at all.
-    said = re.sub(r"[^a-z0-9]", "", (topic or "").lower())
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    tags = [
-        t for t, _ in ranked
-        if t not in _FILLER_TAGS and not (said and t in said)
-    ][:limit]
-    if not tags:
-        logger.info("web grounding: the seeds' tags were all filler (%s)",
-                    [t for t, _ in ranked][:6])
+    # Which of them would find a peer rather than the platform. Decided by
+    # reading them against the request, because it depends entirely on the
+    # request: #fashion is reach under "find me fashion creators" and a real
+    # signal under "find me creators like this potter".
+    ranked = [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+    tags = _tags_worth_sweeping(
+        ranked[:24], wanted, topic, settings=settings,
+    )[:limit]
     missed = [h for h in wanted if h.lower() not in seen_authors]
     note = None
     if missed:

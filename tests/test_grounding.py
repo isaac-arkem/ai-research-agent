@@ -3377,6 +3377,13 @@ def _posts(*rows):
     ]}
 
 
+def _keep_all_tags():
+    """Pass the tag judgement through — these tests are about which POSTS
+    count and how tags are cleaned, not about which are worth sweeping."""
+    return patch("app.services.grounding._tags_worth_sweeping",
+                 side_effect=lambda tags, handles, topic, **kw: tags)
+
+
 def test_the_hunt_uses_the_tags_the_seed_actually_posts():
     """The search for "creators similar to @iamhamamat" was built out of the
     words in that sentence — #naturalbeauty, #melaninpoppin, adjectives she
@@ -3385,7 +3392,8 @@ def test_the_hunt_uses_the_tags_the_seed_actually_posts():
     #ProtectShea, #HamamatVillage."""
     from app.services.grounding import seed_signals
 
-    with patch("app.services.grounding._engine_config",
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_instagram_apify",
                return_value=_posts(
@@ -3406,7 +3414,8 @@ def test_a_stranger_in_the_results_does_not_get_a_vote():
     else's post is the adjective problem again with a scrape attached."""
     from app.services.grounding import seed_signals
 
-    with patch("app.services.grounding._engine_config",
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_instagram_apify",
                return_value=_posts(
@@ -3438,7 +3447,8 @@ def test_punctuation_never_becomes_a_hashtag():
     punctuation in it matches nothing at all."""
     from app.services.grounding import seed_signals
 
-    with patch("app.services.grounding._engine_config",
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_instagram_apify",
                return_value=_posts(("a", ["KingsandQueens:", "#Accra", "ok"]))):
@@ -3472,43 +3482,6 @@ def test_no_token_or_no_platform_means_no_paid_call():
     actor.assert_not_called()
 
 
-def test_filler_tags_never_drive_the_search():
-    """Ranking a seed's tags by how often they are used puts the filler
-    FIRST — every post carries #explore, #reels, #instagram, #beauty — and a
-    sweep of those returns the platform. It did: "creators like @iamhamamat"
-    came back with a Maruti Suzuki tagged #blackbeauty, two dogs, a nail
-    salon and a foggy morning in Dartmoor."""
-    from app.services.grounding import seed_signals
-
-    with patch("app.services.grounding._engine_config",
-               return_value={"APIFY_API_TOKEN": "apify-test"}), \
-         patch("app.services.research.engine.apify_social.search_instagram_apify",
-               return_value=_posts(
-                   ("a", ["explore", "reels", "instagram", "beauty", "accra"]),
-                   ("a", ["explore", "reels", "instagram", "beauty"]),
-                   ("a", ["explore", "reels", "protectshea"]),
-               )):
-        tags, _ = seed_signals(["a"], "instagram", settings=_settings(),
-                               topic="beauty creators on Instagram")
-
-    assert tags == ["accra", "protectshea"]     # used LEAST, worth the most
-
-
-def test_a_tag_that_only_repeats_the_request_is_not_worth_a_sweep():
-    """#beauty on "find beauty creators" adds nothing the query did not
-    already say, and sweeps everyone who has ever typed it."""
-    from app.services.grounding import seed_signals
-
-    with patch("app.services.grounding._engine_config",
-               return_value={"APIFY_API_TOKEN": "apify-test"}), \
-         patch("app.services.research.engine.apify_social.search_instagram_apify",
-               return_value=_posts(("a", ["ghana", "skincare", "accra"]))):
-        tags, _ = seed_signals(["a"], "instagram", settings=_settings(),
-                               topic="skincare creators in Ghana on Instagram")
-
-    assert tags == ["accra"]
-
-
 def test_the_router_names_the_account_they_do_not_want():
     """"like @a but not like @b" — @b's hashtags drove the entire search on a
     turn that said not to. Wrong twice: filler, and from the wrong person."""
@@ -3523,3 +3496,44 @@ def test_the_router_names_the_account_they_do_not_want():
 
     assert got["reference_accounts"] == ["a", "b"]
     assert got["exclude_accounts"] == ["b"]
+
+
+def test_which_tags_are_worth_sweeping_is_read_against_the_request():
+    """This was a word list, and mine had "model", "style" and "woman" in it
+    — exactly the tags a fashion seed lives on. It is not a thing a list can
+    know: #fashion is reach under "find me fashion creators" and a real
+    signal under "find me creators like this potter"."""
+    from app.services.grounding import _tags_worth_sweeping
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"sweep": ["thingstodoinaccra", "accra"]}')) as llm:
+        kept = _tags_worth_sweeping(
+            ["explore", "beauty", "thingstodoinaccra", "accra"],
+            ["iamhamamat"], "beauty creators on Instagram", settings=_settings(),
+        )
+
+    assert kept == ["thingstodoinaccra", "accra"]
+    sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][1]
+    assert "beauty creators on Instagram" in sent["content"]   # the request
+    assert "@iamhamamat" in sent["content"]                    # whose tags
+
+
+def test_a_tag_the_seed_never_posted_cannot_be_swept():
+    """The model returns tags; only the ones it was shown are real."""
+    from app.services.grounding import _tags_worth_sweeping
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"sweep": ["accra", "invented"]}')):
+        kept = _tags_worth_sweeping(["accra"], ["a"], "t", settings=_settings())
+
+    assert kept == ["accra"]
+
+
+def test_no_judgement_falls_back_to_the_planner_rather_than_sweeping_anyway():
+    """Failure has to land on the behaviour from before any of this existed,
+    not on a sweep of whatever the account happened to tag."""
+    from app.services.grounding import _tags_worth_sweeping
+
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("down")):
+        assert _tags_worth_sweeping(["explore", "beauty"], ["a"], "t",
+                                    settings=_settings()) == []
