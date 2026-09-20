@@ -2852,6 +2852,83 @@ def _plan_context_for(answer: str, text: str) -> str:
     return _PLAN_CONTEXT.get(answer, "")
 
 
+def seed_signals(
+    seeds: Sequence[str], platform: str, *, settings, limit: int = 6
+) -> tuple:
+    """What the seeds actually post, so the hunt can use it.
+
+    The search for "creators similar to @iamhamamat" was built out of the
+    words in that sentence. The query planner turned it into #naturalbeauty,
+    #africanbeauty, #organicbeauty, #ghanabeauty — adjectives, not anything
+    @iamhamamat has ever posted — and swept those. It came back with an
+    Italian spa, a Bengali account, a photographer and three shops, because
+    it had never looked at her.
+
+    Seeds were used in exactly one place before this: removing them from the
+    results. The one account we know is right was the one account nobody read.
+
+    One actor run for all of them — the actor takes a LIST of profiles — and
+    it only runs on a turn that is already scraping. Returns (hashtags,
+    note): the tags they really use, most common first, and a sentence when
+    a seed could not be read, because a hunt built on nothing should say so
+    rather than quietly falling back to adjectives.
+    """
+    wanted = [str(h).strip().lstrip("@") for h in (seeds or []) if str(h).strip()]
+    wanted = [h for h in wanted if h][:3]
+    if not wanted or platform not in ("instagram", "tiktok"):
+        return [], None
+    token = (_engine_config(settings) or {}).get("APIFY_API_TOKEN")
+    if not token:
+        return [], None
+
+    from app.services.research.engine import apify_social
+
+    try:
+        if platform == "tiktok":
+            raw = apify_social.search_tiktok_apify(
+                "", "", "", depth="quick", token=token, creators=wanted,
+            )
+        else:
+            raw = apify_social.search_instagram_apify(
+                "", "", "", depth="quick", token=token, ig_creators=wanted,
+            )
+    except Exception as exc:
+        logger.warning("web grounding: could not read the seeds %s: %s", wanted, exc)
+        return [], None
+
+    lowered = {h.lower() for h in wanted}
+    counts: dict = {}
+    seen_authors = set()
+    for item in (raw or {}).get("items") or []:
+        author = str(item.get("author_name") or "").strip().lstrip("@").lower()
+        # Only THEIR posts. The lanes return whoever the actor felt like
+        # adding, and a tag off a stranger's post is the adjective problem
+        # again with an extra scrape attached.
+        if author not in lowered:
+            continue
+        seen_authors.add(author)
+        for tag in item.get("hashtags") or []:
+            # "KingsandQueens:" came back with the colon attached, and a tag
+            # with punctuation in it matches nothing at all.
+            tag = re.sub(r"[^A-Za-z0-9_]", "", str(tag or ""))
+            if len(tag) > 2:
+                key = tag.lower()
+                counts[key] = counts.get(key, 0) + 1
+
+    tags = [t for t, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))][:limit]
+    missed = [h for h in wanted if h.lower() not in seen_authors]
+    note = None
+    if missed:
+        note = (
+            "Could not read " + ", ".join("@" + h for h in missed)
+            + f" on {_PLATFORM_LABEL.get(platform, platform)}, so the search "
+            "below is built on the words of the request rather than on what "
+            "they post."
+        )
+    logger.info("web grounding: seeds %s use %s", wanted, tags or "no tags we could read")
+    return tags, note
+
+
 def _research_via_engine(
     *,
     prompt: str,
@@ -2894,6 +2971,42 @@ def _research_via_engine(
         targets = orchestrator.resolve_targets(
             query.text, provider=client, model=model,
         )
+        # Look, then hunt. The seeds' own tags go first: they are the only
+        # evidence in the turn that came from the right person, and the
+        # planner's are adjectives pulled out of the request.
+        lanes = platforms_named(query.text) or platforms_named(prompt)
+        seed_note = None
+        if seeds and lanes:
+            seed_tags, seed_note = seed_signals(
+                seeds, lanes[0], settings=settings,
+            )
+            # A handle they typed is exact, which is not the same as right.
+            # tiktok.com/@sarkodie is a real account with thirty followers
+            # called "comfortagyeiwaa46", and a hunt for people like him
+            # would have run on it without a word said. Only when the seed
+            # could not be read — a seed whose posts came back is a seed that
+            # exists, and doubting it aloud would be noise.
+            if seed_note:
+                checked = check_handle(seeds[0], lanes[0], settings=settings)
+                if checked is not None and checked.looks_wrong:
+                    other = checked.alternative
+                    seed_note += (
+                        f" Nothing on the web points at @{checked.handle} there "
+                        f"either, while the name gives @{other.handle} on "
+                        f"{_PLATFORM_LABEL.get(other.platform, other.platform)}"
+                        " — say the word and I will use that instead."
+                    )
+            if seed_tags:
+                # Theirs first, the planner's kept behind them. A tag like
+                # #HamamatVillage is exact and may return nobody but her, so
+                # the adjectives stay as the net underneath — and the actor
+                # takes the whole list in one run, so keeping them is free.
+                known = {t.lower() for t in seed_tags}
+                planned_tags = [
+                    t for t in (targets.get("hashtags") or [])
+                    if t and t.lower() not in known
+                ]
+                targets["hashtags"] = (seed_tags + planned_tags)[:10]
         planned = [s for s in {s for sq in plan.subqueries for s in sq.sources}]
         emit(
             "searching",
@@ -2995,6 +3108,11 @@ def _research_via_engine(
         findings, prompt, answer=answer, markets=markets, creators=creators,
         history=history, settings=settings,
     )
+    # A hunt built on nothing has to say so. Silence here reads exactly like
+    # a hunt built on the right person, and the operator cannot tell them
+    # apart from a list of names.
+    if seed_note:
+        prose = f"{seed_note}\n\n{prose}" if prose else seed_note
 
     logger.info(
         "web grounding: engine query=%r sources=%s candidates=%d findings=%d "

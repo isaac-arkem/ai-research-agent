@@ -3364,3 +3364,109 @@ def test_the_old_parser_still_covers_a_turn_the_router_did_not_speak_for():
 
     assert follower_limit("exclude anyone over one million followers") == (None, 1_000_000)
     assert follower_limit("at least 50k followers") == (50_000, None)
+
+
+# --------------------------------------------------------------------------
+# Look, then hunt — the seed is the only account we know is right
+# --------------------------------------------------------------------------
+
+def _posts(*rows):
+    """rows: (author, [tags])"""
+    return {"items": [
+        {"text": "p", "author_name": a, "hashtags": t} for a, t in rows
+    ]}
+
+
+def test_the_hunt_uses_the_tags_the_seed_actually_posts():
+    """The search for "creators similar to @iamhamamat" was built out of the
+    words in that sentence — #naturalbeauty, #melaninpoppin, adjectives she
+    has never posted — and came back with an Italian spa, a Bengali account,
+    a photographer and three shops. Her real tags are #ThingsToDoInAccra,
+    #ProtectShea, #HamamatVillage."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(
+                   ("iamhamamat", ["ProtectShea", "Accra", "ProtectShea"]),
+                   ("iamhamamat", ["ProtectShea", "Accra"]),
+               )) as actor:
+        tags, note = seed_signals(["@iamhamamat"], "instagram", settings=_settings())
+
+    assert tags[0] == "protectshea"      # most used first
+    assert "accra" in tags
+    assert note is None
+    assert actor.call_args.kwargs["ig_creators"] == ["iamhamamat"]
+    assert not actor.call_args.args[0]   # no keyword sweep, profile only
+
+
+def test_a_stranger_in_the_results_does_not_get_a_vote():
+    """The lanes return whoever the actor felt like adding. A tag off someone
+    else's post is the adjective problem again with a scrape attached."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(
+                   ("iamhamamat", ["ProtectShea"]),
+                   ("someshop", ["lashes", "lipkits", "sale"]),
+               )):
+        tags, _ = seed_signals(["iamhamamat"], "instagram", settings=_settings())
+
+    assert tags == ["protectshea"]
+
+
+def test_a_seed_that_cannot_be_read_says_so():
+    """Silence here reads exactly like a hunt built on the right person, and
+    the operator cannot tell them apart from a list of names."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(("someoneelse", ["x"]))):
+        tags, note = seed_signals(["iamhamamat"], "instagram", settings=_settings())
+
+    assert tags == []
+    assert note and "@iamhamamat" in note and "rather than on what" in note
+
+
+def test_punctuation_never_becomes_a_hashtag():
+    """"KingsandQueens:" came back with the colon attached, and a tag with
+    punctuation in it matches nothing at all."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(("a", ["KingsandQueens:", "#Accra", "ok"]))):
+        tags, _ = seed_signals(["a"], "instagram", settings=_settings())
+
+    assert "kingsandqueens" in tags and "accra" in tags
+    assert all(t.isalnum() or "_" in t for t in tags)
+
+
+def test_reading_the_seeds_is_one_run_for_all_of_them():
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_posts(("a", ["x"]), ("b", ["y"]))) as actor:
+        seed_signals(["a", "b"], "tiktok", settings=_settings())
+
+    assert actor.call_count == 1
+    assert actor.call_args.kwargs["creators"] == ["a", "b"]
+
+
+def test_no_token_or_no_platform_means_no_paid_call():
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        with patch("app.services.grounding._engine_config", return_value={}):
+            assert seed_signals(["a"], "tiktok", settings=_settings()) == ([], None)
+        assert seed_signals(["a"], "youtube", settings=_settings()) == ([], None)
+        assert seed_signals([], "tiktok", settings=_settings()) == ([], None)
+    actor.assert_not_called()
