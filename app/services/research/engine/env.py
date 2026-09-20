@@ -62,9 +62,6 @@ def get_config(settings: Any = None) -> Dict[str, Any]:
             AUTH_STATUS_OK if getattr(settings, "openai_api_key", None) else None
         ),
         "TAVILY_API_KEY": getattr(settings, "search_api_key", None),
-        # "news" keeps dates (and survives normalize's require_date gate);
-        # "general" geo-targets and returns evergreen directory pages. See
-        # grounding.tavily_search for why that is a real trade-off.
         # "general" is what researchAgent's own provider always used: it is
         # the only topic Tavily geo-targets on, and it returns the parsed page
         # body the creator extraction reads. It carries no dates, which is
@@ -75,6 +72,7 @@ def get_config(settings: Any = None) -> Dict[str, Any]:
         # thing. Vendoring had silently dropped both.
         "TAVILY_MAX_RESULTS": getattr(settings, "search_results_per_query", 20),
         "TAVILY_SEARCH_DEPTH": getattr(settings, "search_depth", "advanced"),
+        "TAVILY_TIMEOUT": getattr(settings, "search_timeout", 15.0),
         # researchAgent's Settings calls this apify_token; the engine reads
         # APIFY_API_TOKEN. Same secret, two names — translate here rather than
         # renaming either side.

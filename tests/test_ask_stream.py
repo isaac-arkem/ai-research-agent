@@ -51,3 +51,18 @@ def test_ask_stream_failure_narrates_progress_then_failed(mock_gen, client):
         lines = list(response.iter_lines())
 
     assert _parse_sse(lines) == ["progress", "progress", "failed"]
+
+
+@patch("app.api.v1.endpoints.research.generate_research_plan")
+def test_ask_stream_crash_hides_exception(mock_gen, client):
+    mock_gen.side_effect = RuntimeError("secret internals")
+
+    with client.stream(
+        "POST", "/ask/stream",
+        json={"prompt": "Find modest fashion creators in Saudi Arabia"},
+    ) as response:
+        assert response.status_code == 200
+        blob = "\n".join(response.iter_lines())
+
+    assert "secret internals" not in blob
+    assert "Upstream failed" in blob

@@ -174,10 +174,9 @@ def _lane_polymarket(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict
 def _lane_web(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict) -> List[dict]:
     """The web lane — Tavily, asked the operator's own question.
 
-    `web_search` picks the backend from config; with TAVILY_API_KEY set and no
-    Brave/Exa/Serper key it resolves to tavily. Passing the market through
+    `web_search` always uses Tavily. Passing the market through
     `LAST30DAYS_COUNTRY` is what makes this the only geo-targeted lane in the
-    engine, and it only applies on the general topic (see tavily_search).
+    engine, and it only applies on Tavily's general topic.
     """
     config = dict(cfg)
     if opts.get("country_name"):

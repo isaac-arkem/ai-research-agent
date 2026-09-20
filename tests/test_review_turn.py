@@ -270,7 +270,17 @@ def test_an_ordinary_clarifying_question_stores_no_web_results_key():
 
 
 def _no_search(prompt, history=None):
-    """Run a turn with triage and Tavily both watched, and report if either ran."""
+    """Run a turn with triage and Tavily both watched, and report if either ran.
+
+    The router is now consulted on EVERY turn, so the first value is True
+    throughout. It used to be skipped whenever a regex found an "@", and that
+    bypass — not the model — caused most of what went wrong: a comparison
+    naming two accounts became a plan to scrape them.
+
+    What these tests actually protect is the second value: a named-account
+    job must not spend a search. That still holds, because the router returns
+    skip and a skip reaches the planner exactly as the bypass did.
+    """
     planner = _llm('{"clarifying_question":"Which niche?",'
                    '"understood_so_far":"Named accounts.","missing_fields":["niche"]}')
     with patch("app.services.grounding.OpenAI") as triage:
@@ -285,7 +295,7 @@ def _no_search(prompt, history=None):
 def test_naming_accounts_does_not_search_even_with_a_platform_given():
     """The bug this fixes: the old guard keyed on a MISSING platform, so
     "on tiktok" switched off the very check meant to stop this."""
-    assert _no_search("scrape @isaac and @marco on tiktok") == (False, False)
+    assert _no_search("scrape @isaac and @marco on tiktok") == (True, False)
 
 
 def test_a_follow_up_about_a_named_account_job_is_left_to_the_router():
@@ -427,7 +437,7 @@ def test_answering_which_platform_does_not_search():
         ChatTurn(role="user", content="scrape isaac"),
         ChatTurn(role="assistant", content=ASK_PLATFORM),
     ]
-    assert _no_search("instagram", history) == (False, False)
+    assert _no_search("instagram", history) == (True, False)
 
 
 def test_answering_which_niche_does_not_search():
@@ -435,11 +445,13 @@ def test_answering_which_niche_does_not_search():
         ChatTurn(role="user", content="scrape @isaac on tiktok"),
         ChatTurn(role="assistant", content=ASK_NICHE),
     ]
-    assert _no_search("tech-giants", history) == (False, False)
+    assert _no_search("tech-giants", history) == (True, False)
 
 
 def test_a_bare_name_after_scrape_counts_as_a_named_account():
     """"scrape isaac" with no @ is still a named account."""
+    # Still bypassed, by the PLATFORM gate rather than the named-account one:
+    # a handle with no platform is asked about before anything is spent.
     assert _no_search("scrape isaac") == (False, False)
 
 
@@ -497,7 +509,7 @@ def test_a_request_that_took_two_questions_to_settle_still_does_not_search():
         ChatTurn(role="user", content="tiktok"),
         ChatTurn(role="assistant", content=ASK_NICHE),
     ]
-    assert _no_search("ike_tech_boys", history) == (False, False)
+    assert _no_search("ike_tech_boys", history) == (True, False)
 
 
 def test_the_run_of_questions_can_be_any_length():
@@ -506,6 +518,8 @@ def test_the_run_of_questions_can_be_any_length():
         history.append(ChatTurn(role="assistant", content=ASK_NICHE))
         history.append(ChatTurn(role="user", content="not an account"))
     history.append(ChatTurn(role="assistant", content=ASK_NICHE))
+    # Still bypassed, by the PLATFORM gate rather than the named-account one:
+    # a handle with no platform is asked about before anything is spent.
     assert _no_search("still answering", history) == (False, False)
 
 

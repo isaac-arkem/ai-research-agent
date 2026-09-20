@@ -66,6 +66,7 @@ from app.services.search import (
     SearchResult,
     provider_from_settings,
 )
+from app.utils.json_extract import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -341,16 +342,6 @@ class WebContext:
     reason: Optional[str] = None
 
 
-def _extract_json(text: str) -> dict:
-    """The framer is asked for JSON; a fence around it is still common."""
-    cleaned = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.IGNORECASE).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no JSON object in framer response")
-    return json.loads(cleaned[start : end + 1])
-
-
 def _recent_turns(history: Optional[Sequence[ChatTurn]], keep: int = 4) -> List[dict]:
     """Enough history for the framer to resolve "what about Kenya?" into a
     real query, without paying to replay the whole thread."""
@@ -414,6 +405,29 @@ def triage_search(
     )
     if not escalation_model or escalation_model == model:
         return routed
+
+    # A bare reply to a question we asked. "tech_giants", answering "which
+    # niche?" inside a job scraping @isaac and @marco, is a FIELD ANSWER — and
+    # read alone it is indistinguishable from a new topic, because that is all
+    # it is: two words.
+    #
+    # Measured, this is a capability limit, not a missing rule. The router's
+    # instructions already carry this exact example by name, and richer
+    # history does not help: with the stored question naming both accounts,
+    # gpt-4o-mini still searched three times out of three. gpt-4o skipped
+    # three out of three. So it is escalated rather than gated.
+    if routed.get("action") == "search" and _bare_answer_to_a_pending_field(
+        prompt, history
+    ):
+        logger.info(
+            "web grounding: %s searched on a bare reply to a pending field — re-asking %s",
+            model, escalation_model,
+        )
+        return _route_once(
+            prompt, ctx, history,
+            openai_key=openai_key, model=escalation_model, timeout=timeout,
+        )
+
     if routed.get("action") != "skip":
         return routed
     reason = str(routed.get("reason") or "").lower()
@@ -466,7 +480,7 @@ def _route_once(
         max_tokens=250,
         response_format={"type": "json_object"},
     )
-    parsed = _extract_json(response.choices[0].message.content or "")
+    parsed = extract_json_object(response.choices[0].message.content or "")
 
     action = str(parsed.get("action") or "").strip().lower()
     if action not in ACTIONS:
@@ -769,7 +783,7 @@ def synthesise_findings(
         logger.warning("web grounding: synthesis failed: %s", exc)
         return None
 
-    parsed = _extract_json(response.choices[0].message.content or "")
+    parsed = extract_json_object(response.choices[0].message.content or "")
     reply = str(parsed.get("reply") or "").strip()
     nxt = str(parsed.get("next") or "").strip()
 
@@ -856,7 +870,7 @@ def respond_from_thread(
             temperature=0.2,
             response_format={"type": "json_object"},
         )
-        parsed = _extract_json(response.choices[0].message.content or "")
+        parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
         logger.warning("web grounding: respond failed, planning unaided: %s", exc)
         return (None, None)
@@ -1300,7 +1314,7 @@ def propose_comparison_bases(
             temperature=0,
             response_format={"type": "json_object"},
         )
-        parsed = _extract_json(response.choices[0].message.content or "")
+        parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
         logger.warning("web grounding: comparison-basis proposal failed: %s", exc)
         return []
@@ -1367,7 +1381,7 @@ def extract_markets(
             temperature=0,
             response_format={"type": "json_object"},
         )
-        parsed = _extract_json(response.choices[0].message.content or "")
+        parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
         logger.warning("web grounding: market extraction failed: %s", exc)
         return []
@@ -1465,7 +1479,7 @@ def extract_creators(
     # and shed rows the moment the turn finished. Worse than showing nothing.
     response = client.chat.completions.create(**common)
     raw = response.choices[0].message.content or ""
-    parsed = _extract_json(raw)
+    parsed = extract_json_object(raw)
     rows = parsed.get("creators")
     if not isinstance(rows, list):
         rows = []
@@ -1883,8 +1897,7 @@ def resolve_seed(
                     label, slug, platform, how)
         return ResolvedSeed(
             name=label, handle=slug, platform=platform,
-            url=(f"https://www.tiktok.com/@{slug}" if platform == "tiktok"
-                 else f"https://www.instagram.com/{slug}/"),
+            url=profile_url(slug, platform),
         )
 
     candidates = []
@@ -1929,6 +1942,31 @@ def _content_of_turn(turn) -> str:
         turn.get("content") if isinstance(turn, dict) else None
     )
     return str(content or "")
+
+
+def _bare_answer_to_a_pending_field(prompt, history) -> bool:
+    """Is this a short reply to a question that asked for a field?
+
+    Not a judgement about what it means — only the shape: a couple of words,
+    no question of its own, arriving straight after a turn that asked for
+    something. What it MEANS is the router's to decide, which is the whole
+    point of handing this over as a fact instead of acting on it here.
+    """
+    text = (prompt or "").strip()
+    if not text or len(text.split()) > 4 or "?" in text:
+        return False
+    for turn in reversed(list(history or [])):
+        if _role_of_turn(turn) != "assistant":
+            continue
+        content = _content_of_turn(turn)
+        if "missing_fields" not in content:
+            return False
+        try:
+            fields = json.loads(content).get("missing_fields") or []
+        except ValueError:
+            return False
+        return bool(fields)
+    return False
 
 
 def _basis_already_asked(history) -> bool:
@@ -2454,7 +2492,7 @@ def _research_via_engine(
 
         plan = orchestrator.plan_for(
             query.text, provider=client, model=model,
-            depth=getattr(settings, "research_depth", "quick"),
+            depth=getattr(settings, "research_depth", "default"),
             # The planner writes better subqueries when it knows what the
             # answer has to BE. Left unsaid, a market question retrieves
             # articles about the niche rather than pages that compare
@@ -2483,7 +2521,7 @@ def _research_via_engine(
             window=orchestrator.window_for(
                 getattr(settings, "research_window_days", 365)
             ),
-            depth=getattr(settings, "research_depth", "quick"),
+            depth=getattr(settings, "research_depth", "default"),
             country_name=(market.name if market else None),
             answer=answer,
             # A platform the operator named by hand. They asked about

@@ -2051,20 +2051,6 @@ def test_a_list_of_people_is_a_creator_question_however_it_is_phrased():
     assert "Musicians, artists, singers" in TRIAGE_SYSTEM
 
 
-def test_both_tavily_paths_ask_for_the_same_thing():
-    """The vendored backend is primary; researchAgent's own provider is the
-    fallback when the engine returns nothing. Two implementations that
-    disagree on size and depth means the fallback silently returns a different
-    search than the primary."""
-    from app.core.config import get_settings
-    from app.services.research.engine import env
-
-    s = get_settings()
-    cfg = env.get_config()
-    assert cfg["TAVILY_MAX_RESULTS"] == s.search_results_per_query
-    assert cfg["TAVILY_SEARCH_DEPTH"] == s.search_depth
-
-
 def test_the_engine_web_lane_is_researchagents_own_tavily_provider():
     """There is one Tavily implementation, not two.
 
@@ -2098,6 +2084,7 @@ def test_the_web_lane_reads_the_same_settings_as_the_provider():
     s, cfg = get_settings(), env.get_config()
     assert cfg["TAVILY_MAX_RESULTS"] == s.search_results_per_query
     assert cfg["TAVILY_SEARCH_DEPTH"] == s.search_depth
+    assert cfg["TAVILY_TIMEOUT"] == s.search_timeout
 
 
 def test_the_platform_balance_rule_keeps_the_subject():

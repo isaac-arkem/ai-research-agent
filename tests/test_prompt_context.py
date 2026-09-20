@@ -31,6 +31,9 @@ def test_chat_messages_are_openai_turns():
 def test_sanitize_strips_and_caps():
     assert sanitize_prompt("  hello   there  ") == "hello there"
     assert sanitize_prompt("   ") == ""
+    brief = "situation. " * 400  # ~4400, used to be over the old 2000 cap
+    assert len(brief) > 2000
+    assert sanitize_prompt(brief) == brief.strip()
 
 
 def test_system_prompt_does_not_suggest_substitute_markets():

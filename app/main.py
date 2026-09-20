@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.api import api_router
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.errors import http_exception_handler, validation_exception_handler
 
 logging.basicConfig(
@@ -37,8 +37,9 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down %s", settings.app_name)
 
 
-def create_app() -> FastAPI:
-    settings = get_settings()
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    docs = settings.debug
     application = FastAPI(
         title="Research Agent",
         description=(
@@ -48,8 +49,9 @@ def create_app() -> FastAPI:
         ),
         version="2.0.0",
         lifespan=lifespan,
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if docs else None,
+        redoc_url="/redoc" if docs else None,
+        openapi_url="/openapi.json" if docs else None,
     )
     application.add_middleware(
         CORSMiddleware,
@@ -69,7 +71,10 @@ def create_app() -> FastAPI:
     def chat_ui():
         index = STATIC_DIR / "index.html"
         if not index.exists():
-            return {"ok": True, "docs": "/docs"}
+            body = {"ok": True}
+            if settings.debug:
+                body["docs"] = "/docs"
+            return body
         return FileResponse(index)
 
     return application

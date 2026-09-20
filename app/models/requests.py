@@ -5,23 +5,27 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.utils.guards import MAX_PROMPT_LENGTH
+
+# Same ceiling as the current question. A stored plan, a review payload, or
+# a long brief all need room. 20 turns × this size is the request-body
+# ceiling; the planner only reads the last 8 anyway.
+MAX_HISTORY_TURNS = 20
+MAX_HISTORY_CONTENT = MAX_PROMPT_LENGTH
+
 
 class ChatMessage(BaseModel):
     """One prior turn, same shape arkemgpt-api's frontend sends as conversation_history."""
 
     role: Literal["user", "assistant"]
-    content: str
+    content: str = Field(min_length=1, max_length=MAX_HISTORY_CONTENT)
 
 
 class AskRequest(BaseModel):
     prompt: str = Field(
         min_length=1,
-        max_length=2000,
+        max_length=MAX_PROMPT_LENGTH,
         description="The operator's research question.",
-    )
-    model: Optional[str] = Field(
-        default=None,
-        description="Override the LLM model. Defaults to RESEARCH_AGENT_MODEL.",
     )
     conversation_id: Optional[UUID] = Field(
         default=None,
@@ -29,6 +33,7 @@ class AskRequest(BaseModel):
     )
     conversation_history: List[ChatMessage] = Field(
         default_factory=list,
+        max_length=MAX_HISTORY_TURNS,
         description="Optional client-side history. Leave empty when using conversation_id.",
     )
 
@@ -41,13 +46,6 @@ class AskRequest(BaseModel):
     @field_validator("conversation_id", mode="before")
     @classmethod
     def blank_id_is_none(cls, value):
-        if value == "" or value is None:
-            return None
-        return value
-
-    @field_validator("model", mode="before")
-    @classmethod
-    def blank_model_is_none(cls, value):
         if value == "" or value is None:
             return None
         return value

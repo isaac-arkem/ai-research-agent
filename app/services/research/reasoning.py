@@ -1,7 +1,7 @@
 # The engine's reasoning seam, wired to researchAgent's OpenAI client.
 #
 # The vendored engine asks for a `providers.ReasoningClient` in two places:
-# the planner (which we replaced — see orchestrator.plan_from_openai) and
+# the planner (which we replaced — see orchestrator.plan_for) and
 # `rerank.rerank_candidates`. Rerank is the one that matters: rerank_score is
 # 60% of a candidate's final score, and with no client it silently falls back
 # to a deterministic local heuristic that cannot read the topic.

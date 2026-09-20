@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence
 
 from app.core.supabase import get_supabase_admin
+from app.services.validator import VALID_PLATFORMS
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,6 @@ BARE_AFTER_SCRAPE_RE = re.compile(
     re.IGNORECASE,
 )
 HANDLE_TOKEN_RE = re.compile(r"[A-Za-z0-9._]{2,30}")
-VALID_PLATFORMS = {"tiktok", "instagram"}
 SKIP_TOKENS = {
     "on",
     "and",

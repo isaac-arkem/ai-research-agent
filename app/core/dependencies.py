@@ -25,7 +25,8 @@ def _fetch_countries_from_db(settings: Settings) -> Optional[List[MarketEntry]]:
 
     This table belongs to the research agent alone — `markets` stays the
     source of truth for the scrape pipelines and anything keyed on
-    market_id. Returns None on any failure so the caller falls back.
+    market_id. Returns None on any failure so the caller can raise
+    CountriesUnavailable rather than plan against a stale list.
     """
     client = get_supabase_admin(settings)
     if client is None:
@@ -60,7 +61,7 @@ def _fetch_countries_from_db(settings: Settings) -> Optional[List[MarketEntry]]:
 
         if not countries:
             logger.warning(
-                "%s returned 0 rows — falling back to hardcoded markets",
+                "%s returned 0 rows — no countries to plan against",
                 COUNTRIES_TABLE,
             )
             return None
@@ -70,7 +71,7 @@ def _fetch_countries_from_db(settings: Settings) -> Optional[List[MarketEntry]]:
 
     except Exception as exc:
         logger.warning(
-            "%s fetch failed (%s) — falling back to hardcoded markets",
+            "%s fetch failed (%s) — no countries to plan against",
             COUNTRIES_TABLE,
             exc,
         )
@@ -220,13 +221,3 @@ def get_agent_context() -> AgentContext:
 def reset_agent_context() -> None:
     global _agent_context
     _agent_context = None
-
-
-def get_openai_key() -> str:
-    """Dependency: provides the OpenAI API key from settings."""
-    return get_settings().openai_api_key
-
-
-def get_model() -> str:
-    """Dependency: provides the configured LLM model name."""
-    return get_settings().research_agent_model

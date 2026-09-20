@@ -1,67 +1,13 @@
-"""Web search retrieval via Brave Search, Exa, Serper, Parallel, or a keyless floor."""
+"""Web search retrieval via Tavily."""
 
 from __future__ import annotations
 
 import sys
-import urllib.parse
-from dataclasses import dataclass
-from datetime import datetime
 from urllib.parse import urlparse
 
-from . import http, log, schema
+from . import http, log
 from app.services.search import SearchError, SearchQuery
 from app.services.search.tavily import TavilyProvider
-
-
-@dataclass(frozen=True)
-class GroundedClaimText:
-    """Candidate text with its exact primary evidence item."""
-
-    candidate_id: str
-    title: str
-    summary: str
-    item: schema.SourceItem
-
-
-def claim_source_map(report: schema.Report) -> dict[str, GroundedClaimText]:
-    """Expose only candidate claims that have a clean primary-item trace.
-
-    Freshness verification deliberately starts here instead of scanning all
-    report prose. A candidate without a primary ``SourceItem`` cannot produce
-    an auditable per-claim verdict.
-    """
-    grounded: dict[str, GroundedClaimText] = {}
-    for candidate in report.ranked_candidates:
-        item = schema.candidate_primary_item(candidate)
-        if item is None:
-            continue
-        grounded[candidate.candidate_id] = GroundedClaimText(
-            candidate_id=candidate.candidate_id,
-            title=candidate.title,
-            summary=candidate.snippet or item.snippet or item.body,
-            item=item,
-        )
-    return grounded
-
-
-# ---------------------------------------------------------------------------
-# Brave Search API
-# ---------------------------------------------------------------------------
-
-def _parse_serper_date(raw: str) -> str | None:
-    if not raw:
-        return None
-    normalized = _normalize_date(raw)
-    if normalized:
-        return normalized
-    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d"):
-        try:
-            return datetime.strptime(raw.strip(), fmt).date().isoformat()
-        except ValueError:
-            continue
-    return None
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +39,6 @@ def web_search(
     Returns ([], artifact) on failure rather than raising, matching the other
     lanes: one dead lane must not end the run.
     """
-    
 
     api_key = (config.get("TAVILY_API_KEY") or "").strip()
     if not api_key:
@@ -111,7 +56,7 @@ def web_search(
             text=query,
             country_name=country_name,
             limit=int(config.get("TAVILY_MAX_RESULTS") or 20),
-            timeout=float(config.get("TAVILY_TIMEOUT") or 30.0),
+            timeout=float(config.get("TAVILY_TIMEOUT") or 15.0),
         ))
     except SearchError as exc:
         log.source_log("Web", f"Tavily unavailable: {exc}", tty_only=False)
@@ -207,31 +152,6 @@ def _enrich_reddit_items(items: list[dict]) -> list[dict]:
         except Exception as exc:
             sys.stderr.write(f"[Web] Reddit enrichment failed for {url}: {exc}\n")
     return items
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _normalize_date(value: object) -> str | None:
-    if value is None:
-        return None
-    parsed = dates.parse_date(str(value).strip())
-    if not parsed:
-        return None
-    return parsed.date().isoformat()
-
-
-def _serper_date_param(iso_date: str) -> str:
-    """Convert YYYY-MM-DD to MM/DD/YYYY for Serper tbs parameter."""
-    parts = iso_date.split("-")
-    return f"{parts[1]}/{parts[2]}/{parts[0]}"
-
-
-def _in_date_range(pub_date: str | None, date_range: tuple[str, str]) -> bool:
-    if not pub_date:
-        return False
-    return date_range[0] <= pub_date <= date_range[1]
 
 
 def _domain(url: str) -> str:

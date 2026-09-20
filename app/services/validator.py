@@ -6,7 +6,7 @@
 # message instead of passing bad data downstream.
 #
 # Rules:
-#   1. Country codes must be from our 19 supported markets
+#   1. Country codes must be from the markets loaded from Supabase
 #   2. Pipeline field must match the array it's in
 #   3. max_creators must be one of [5, 10, 20, 50, 100, 200]
 #   4. posts_per_source must be 1–100; recency_days must be positive or null

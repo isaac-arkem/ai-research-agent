@@ -2,15 +2,19 @@
 #
 # Before the operator's question reaches the AI, it passes through here.
 # We clean up invisible characters, collapse extra whitespace, and enforce
-# a hard length cap. This prevents:
+# a length ceiling. This prevents:
 #   - Hidden control characters that could confuse the LLM
 #   - BiDi override characters (used in text-direction attacks)
-#   - Absurdly long prompts that waste tokens and money
+#   - A megabyte paste that wastes tokens and money
+#
+# The ceiling is high on purpose: operators often paste a brief — a few
+# paragraphs of situation — before the actual ask. 2000 chars was clipping
+# that. 32k is several pages, which is the brief; it is not unlimited.
 
 import re
 import unicodedata
 
-MAX_PROMPT_LENGTH = 2000
+MAX_PROMPT_LENGTH = 32_000
 
 # Matches invisible control characters (ASCII 0x00–0x08, 0x0B, 0x0C, 0x0E–0x1F, 0x7F)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -32,7 +36,7 @@ def sanitize_prompt(raw: str) -> str:
       3. Strip BiDi override characters
       4. Collapse all whitespace to single spaces
       5. Trim leading/trailing whitespace
-      6. Hard-cap at 2000 characters
+      6. Cap at MAX_PROMPT_LENGTH (a brief, not a document dump)
     """
     text = unicodedata.normalize("NFKC", raw)
     text = _CONTROL_RE.sub("", text)
