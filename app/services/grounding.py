@@ -2623,11 +2623,64 @@ def _merge_creators(first: List[Creator], second: List[Creator]) -> List[Creator
     return out
 
 
-# Below this, a rate is noise: one video reaching past a tiny following
-# swings it by hundreds of per cent. Not a statement about how big an
-# account should be — accounts under it are still returned, they are just
-# not ordered by a number computed over thirty-eight people.
-MIN_FANS_FOR_A_RATE = 1_000
+# Below this many views a rate is noise — five likes on a video twenty
+# people saw is 25%, and it means nothing. Accounts under it are still
+# returned, they are just not ordered on it.
+MIN_VIEWS_FOR_A_RATE = 1_000
+
+
+def _engagement_rates(candidates) -> dict:
+    """Interactions over VIEWS, summed across everything each creator posted.
+
+    Two corrections, and the second is the one that mattered.
+
+    Over views, not followers. TikTok shows a video to people who do not
+    follow the account, so interactions can dwarf the following: 740 of them
+    on THIRTY-EIGHT followers read as 1947%, and topped a list of "the
+    highest engagement rate in the UK". Views are who actually saw it, so
+    the ratio answers the question being asked — of the people this reached,
+    how many did something — and it does not explode on a small account. The
+    follower floor that was papering over that is gone with it.
+
+    Summed across their videos, not read off one. A creator with five posts
+    in the results was ranked on whichever single one sorted first, so one
+    lucky video spoke for them. Totals in, totals out: sum the likes,
+    comments and shares, sum the views, divide once.
+
+    Instagram counts too, wherever the post carried a view count — it could
+    not be ranked at all when the denominator was followers, because the
+    actor returns none.
+    """
+    from app.services.research.engine import schema as engine_schema
+
+    totals: dict = {}
+    for candidate in candidates:
+        item = engine_schema.candidate_primary_item(candidate)
+        if (getattr(item, "source", "") or "").strip().lower() not in (
+            "instagram", "tiktok"
+        ):
+            continue
+        handle = (getattr(item, "author", "") or "").strip().lstrip("@").lower()
+        if not handle:
+            continue
+        engagement = getattr(item, "engagement", None) or {}
+        acted = views = 0.0
+        for key, value in engagement.items():
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+                continue
+            if key == "views":
+                views += float(value)
+            else:
+                acted += float(value)
+        seen = totals.setdefault(handle, [0.0, 0.0])
+        seen[0] += acted
+        seen[1] += views
+
+    rates = {}
+    for handle, (acted, views) in totals.items():
+        if views >= MIN_VIEWS_FOR_A_RATE and acted > 0:
+            rates[handle] = acted / views
+    return rates
 
 
 def creators_from_post_authors(
@@ -2651,6 +2704,7 @@ def creators_from_post_authors(
     """
     from app.services.research.engine import schema as engine_schema
 
+    rates = _engagement_rates(candidates) if rank_by == "engagement_rate" else {}
     by_handle: dict = {}
     for candidate in candidates:
         item = engine_schema.candidate_primary_item(candidate)
@@ -2664,12 +2718,13 @@ def creators_from_post_authors(
         engagement = getattr(item, "engagement", None) or {}
         meta = getattr(item, "metadata", None) or {}
 
-        # Rank by the ACCOUNT's audience, not one post's likes. Ranking by the
-        # post put @hismensah and @aym1_asukese1 above every real artist,
-        # because a small account with one decent video beats a big account
-        # having a quiet week. TikTok gives the follower count on every item;
-        # Instagram gives none, so those fall back to post engagement and sort
-        # below anything with a real audience behind it.
+        # Rank by the ACCOUNT's audience, not one post's likes — unless they
+        # asked for engagement, which is handled above. Ranking by the post
+        # put @hismensah and @aym1_asukese1 above every real artist, because a
+        # small account with one decent video beats a big account having a
+        # quiet week. TikTok gives the follower count on every item; Instagram
+        # gives none, so those fall back to post engagement and sort below
+        # anything with a real audience behind it.
         fans = meta.get("author_fans")
         fans = float(fans) if isinstance(fans, (int, float)) and not isinstance(fans, bool) else None
         post_total = sum(
@@ -2691,33 +2746,14 @@ def creators_from_post_authors(
         # out at 522%, because views dwarf everything and views are reach, not
         # engagement. Likes, comments and shares are the things somebody chose
         # to do. The same post reads 22%.
-        acted = sum(
-            float(v) for k, v in engagement.items()
-            if k != "views" and isinstance(v, (int, float))
-            and not isinstance(v, bool) and v > 0
-        )
-        engagement_rate = None
+        engagement_rate = rates.get(handle.lower())
         if rank_by == "engagement_rate":
-            # A rate over a handful of followers is arithmetic, not a fact
-            # about the account. @xx.daniellejohnston.xx came top of "highest
-            # engagement rate in the UK" at 1947% on THIRTY-EIGHT followers,
-            # with @uk.girls651 at 150% on fourteen just behind. One video
-            # shown past their own followers does that, and it says nothing
-            # about how an audience behaves because there is barely an
-            # audience. The floor is about the denominator being too small to
-            # divide by, not about small accounts being unwelcome — they are
-            # still returned, just not ranked on a number this noisy.
-            if fans and fans >= MIN_FANS_FOR_A_RATE and acted > 0:
-                engagement_rate = acted / fans
-                rank = engagement_rate
-            else:
-                # BELOW every real rate, not above it. rank was the follower
-                # count, which is hundreds to millions while a rate is 0 to
-                # 20 — so every account whose rate could not be computed
-                # outranked every account whose rate could, and the list came
-                # back led by an account with 119 followers and no rate at
-                # all.
-                rank = -1.0
+            # BELOW every real rate, not above it. rank was the follower
+            # count, which is hundreds to millions while a rate is 0 to 1 —
+            # so every account whose rate could not be computed outranked
+            # every account whose rate could, and the list came back led by
+            # an account with 119 followers and no rate at all.
+            rank = engagement_rate if engagement_rate is not None else -1.0
 
         seen = by_handle.get(handle.lower())
         if seen and seen[0] >= (rank, post_total):

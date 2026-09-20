@@ -3649,68 +3649,6 @@ def _candidate(handle, fans, likes, source="tiktok", views=0):
     return SimpleNamespace(source=source, source_items=[item])
 
 
-def test_engagement_rate_is_not_follower_count():
-    """A two-million-follower account reacts less per follower than one with
-    twenty thousand, so answering "highest engagement rate" with the biggest
-    accounts returns close to the reverse of the question."""
-    from app.services.grounding import creators_from_post_authors
-
-    cands = [
-        _candidate("huge", 2_000_000, 20_000),      # 1% engagement
-        _candidate("small", 20_000, 4_000),         # 20% engagement
-    ]
-    by_size = [c.handle for c in creators_from_post_authors(cands)]
-    by_rate = [c.handle for c in creators_from_post_authors(cands, "engagement_rate")]
-
-    assert by_size[0] == "huge"
-    assert by_rate[0] == "small"
-    assert "20.0% engagement" in [
-        c.why for c in creators_from_post_authors(cands, "engagement_rate")
-        if c.handle == "small"
-    ][0]
-
-
-def test_a_rate_needs_both_numbers_and_is_never_guessed():
-    """Instagram returns no follower count, so a rate cannot be computed
-    there — those keep their audience ranking rather than a made-up one."""
-    from app.services.grounding import creators_from_post_authors
-
-    cands = [_candidate("ig_person", None, 5_000, source="instagram")]
-    got = creators_from_post_authors(cands, "engagement_rate")
-
-    assert got and "engagement" not in got[0].why
-
-
-def test_views_are_reach_and_do_not_count_as_engagement():
-    """Summing everything put a post with 500,000 views, 20,000 likes and
-    100,000 followers at a 522% "engagement rate". Views dwarf the rest and
-    views are not something anybody chose to do. The same post is 22%."""
-    from app.services.grounding import creators_from_post_authors
-
-    got = creators_from_post_authors(
-        [_candidate("a", 100_000, 20_000, views=500_000)], "engagement_rate")
-
-    assert "20.0% engagement" in got[0].why
-    assert "522" not in got[0].why
-
-
-def test_a_rate_over_a_handful_of_followers_is_arithmetic_not_a_fact():
-    """"Highest engagement rate in the UK" came back led by an account with
-    THIRTY-EIGHT followers at 1947%, and one with fourteen at 150%. A single
-    video shown past their own followers does that, and it says nothing about
-    how an audience behaves because there is barely an audience."""
-    from app.services.grounding import creators_from_post_authors
-
-    got = creators_from_post_authors([
-        _candidate("tiny", 38, 740),            # 1947% — noise
-        _candidate("real", 20_000, 4_000),      # 20% — a fact
-    ], "engagement_rate")
-
-    assert [c.handle for c in got][0] == "real"
-    assert "1947" not in " ".join(c.why for c in got)
-    assert "tiny" in [c.handle for c in got]    # returned, just not ranked on it
-
-
 def test_an_account_with_no_rate_does_not_outrank_every_rate():
     """rank was the follower count when a rate could not be computed —
     hundreds to millions, against a rate of 0 to 20. So every account without
@@ -3724,3 +3662,64 @@ def test_an_account_with_no_rate_does_not_outrank_every_rate():
     ], "engagement_rate")
 
     assert [c.handle for c in got][0] == "has_a_rate"
+
+
+def test_engagement_is_measured_against_who_saw_it():
+    """Over VIEWS, not followers. TikTok shows a video to people who do not
+    follow the account, so interactions can dwarf the following: 740 of them
+    on THIRTY-EIGHT followers read as 1947% and topped "the highest
+    engagement rate in the UK". Views are who actually saw it, so the ratio
+    answers the question asked — of the people this reached, how many did
+    something — and it does not explode on a small account."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("tiny", 38, 740, views=20_000),        # 3.7% of who saw it
+        _candidate("real", 20_000, 4_000, views=40_000),  # 10%
+    ], "engagement_rate")
+
+    assert [c.handle for c in got] == ["real", "tiny"]
+    assert "10.0% engagement" in got[0].why
+    assert "1947" not in " ".join(c.why for c in got)
+
+
+def test_a_rate_is_summed_across_everything_they_posted():
+    """A creator with several posts in the results was ranked on whichever
+    single one sorted first, so one lucky video spoke for them. Totals in,
+    totals out."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("steady", 5_000, 500, views=10_000),    # 5%
+        _candidate("steady", 5_000, 500, views=10_000),    # 5%
+        _candidate("spiky", 5_000, 1_800, views=2_000),    # 90% on one video
+        _candidate("spiky", 5_000, 200, views=98_000),     # ...and 0.2% on another
+    ], "engagement_rate")
+
+    order = [c.handle for c in got]
+    assert order[0] == "steady"      # 1000/20000 = 5%  beats  2000/100000 = 2%
+
+
+def test_a_rate_over_a_handful_of_views_is_not_a_rate():
+    """Five likes on a video twenty people saw is 25% and means nothing."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("barelyseen", 900, 5, views=20),
+        _candidate("seen", 900, 900, views=30_000),
+    ], "engagement_rate")
+
+    assert [c.handle for c in got][0] == "seen"
+    assert "25.0% engagement" not in " ".join(c.why for c in got)
+
+
+def test_instagram_can_be_ranked_by_engagement_now():
+    """It could not be, when the denominator was followers — the Instagram
+    actor returns none. A view count it does return."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors(
+        [_candidate("ig", None, 900, source="instagram", views=10_000)],
+        "engagement_rate")
+
+    assert "9.0% engagement" in got[0].why
