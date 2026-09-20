@@ -416,11 +416,11 @@ def triage_search(
     # history does not help: with the stored question naming both accounts,
     # gpt-4o-mini still searched three times out of three. gpt-4o skipped
     # three out of three. So it is escalated rather than gated.
-    if routed.get("action") == "search" and _bare_answer_to_a_pending_field(
+    if routed.get("action") == "search" and _answers_a_pending_field(
         prompt, history
     ):
         logger.info(
-            "web grounding: %s searched on a bare reply to a pending field — re-asking %s",
+            "web grounding: %s searched while a field question was open — re-asking %s",
             model, escalation_model,
         )
         return _route_once(
@@ -1944,16 +1944,22 @@ def _content_of_turn(turn) -> str:
     return str(content or "")
 
 
-def _bare_answer_to_a_pending_field(prompt, history) -> bool:
-    """Is this a short reply to a question that asked for a field?
+def _answers_a_pending_field(prompt, history) -> bool:
+    """Is a question asking for fields still outstanding?
 
-    Not a judgement about what it means — only the shape: a couple of words,
-    no question of its own, arriving straight after a turn that asked for
-    something. What it MEANS is the router's to decide, which is the whole
-    point of handing this over as a fact instead of acting on it here.
+    A fact, not a judgement: the last assistant turn asked for something and
+    has not been answered yet. What THIS message means — an answer, or a new
+    subject entirely — is the router's to decide.
     """
-    text = (prompt or "").strip()
-    if not text or len(text.split()) > 4 or "?" in text:
+    # No judgement about the SHAPE of the reply. An earlier version required
+    # four words or fewer and no question mark, which read "instagram and
+    # niche is tech_boys" — six words answering exactly the question that had
+    # been asked — as a new topic, and searched. Counting words is the same
+    # mistake as matching keywords, one level down.
+    #
+    # So the only fact reported here is that a question asking for fields is
+    # outstanding. Whether this message answers it is the router's call.
+    if not (prompt or "").strip():
         return False
     for turn in reversed(list(history or [])):
         if _role_of_turn(turn) != "assistant":

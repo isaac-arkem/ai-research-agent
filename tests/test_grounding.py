@@ -2738,3 +2738,37 @@ def test_the_router_keeps_the_limit_in_the_topic():
     from app.services.grounding import TRIAGE_SYSTEM
 
     assert "CARRY THE OPERATOR'S LIMITS INTO THE TOPIC" in TRIAGE_SYSTEM
+
+
+def test_an_open_field_question_escalates_however_the_answer_is_worded():
+    """"instagram and niche is tech_boys" answers exactly what was asked, and
+    was searched instead — because the escalation required four words or
+    fewer and this is six. Counting words is the same mistake as matching
+    keywords, one level down.
+
+    The fact reported is only that a field question is outstanding. Whether
+    this message answers it is the router's call."""
+    import json as _json
+    from app.models.domain import ChatTurn
+    from app.services.grounding import _answers_a_pending_field
+
+    pending = [
+        ChatTurn(role="user", content="scrape isaac"),
+        ChatTurn(role="assistant", content=_json.dumps(
+            {"clarifying_question": "Which platform and niche?",
+             "missing_fields": ["platform", "niche"]})),
+    ]
+    for reply in ("instagram and niche is tech_boys",
+                  "the niche is cooking, use tiktok please",
+                  "tech_giants",
+                  "instagram"):
+        assert _answers_a_pending_field(reply, pending), reply
+
+    # Nothing outstanding, nothing to escalate.
+    answered = pending + [
+        ChatTurn(role="user", content="instagram"),
+        ChatTurn(role="assistant", content='{"summary":"a plan"}'),
+    ]
+    assert not _answers_a_pending_field("anything", answered)
+    assert not _answers_a_pending_field("anything", [])
+    assert not _answers_a_pending_field("", pending)
