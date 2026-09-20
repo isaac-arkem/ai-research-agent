@@ -2614,20 +2614,80 @@ def test_the_verified_account_wins_when_a_url_cannot_say():
     ]
 
 
-def test_the_biggest_unverified_account_is_refused():
-    """The @billburrbits case. A clips account can out-follow the real person,
-    and naming it back with confidence is the failure this exists to stop."""
+def test_an_ordinary_creator_is_not_refused_for_being_unverified():
+    """Most people are not verified. @uncle.gago is somebody the operator has
+    every right to research, and "verified or nothing" would lose exactly the
+    ordinary creators this tool is for. One candidate, nothing to choose
+    between — so it comes back, marked unconfirmed."""
     from app.services.grounding import resolve_seed
 
     provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
-        ("https://www.tiktok.com/@billburrbits", "Bill Burr (@billburrbits)"),
+        ("https://www.tiktok.com/@unclegagoclips", "Uncle Gago"),
     ))
     with patch("app.services.grounding.provider_from_settings", return_value=provider), \
          patch("app.services.grounding._engine_config",
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_tiktok_apify",
-               return_value=_actor(("billburrbits", 900_000, False))):
+               return_value=_actor(("unclegagoclips", 4_200, False))):
+        seed = resolve_seed("Uncle Gago", settings=_settings())
+
+    assert seed is not None
+    assert seed.handle == "unclegagoclips"
+    assert seed.confirmed is False          # and the prose has to say so
+
+
+def test_a_choice_between_unverified_rivals_is_not_guessed():
+    """The @billburrbits shape. With several plausible accounts and nothing
+    verifying any of them, picking by follower count is a guess — and a clips
+    account can out-follow the person it is about."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@billburrbits", "Bill Burr (@billburrbits)"),
+        ("https://www.tiktok.com/@billburrclips", "Bill Burr clips"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("billburrbits", 900_000, False),
+                                   ("billburrclips", 120_000, False))):
         assert resolve_seed("Bill Burr", settings=_settings()) is None
+
+
+def test_a_verified_account_still_beats_an_unverified_one():
+    """Order matters: verified wins outright, even when an unverified rival
+    has more followers."""
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("shattawalenews", 9_000_000, False),
+                                   ("shattawaleking", 5_200_000, True))):
+        seed = resolve_seed("Shatta Wale", settings=_settings())
+
+    assert seed.handle == "shattawaleking" and seed.confirmed is True
+
+
+def test_a_remark_never_starts_a_paid_actor_run():
+    """check_handle is a sentence to read. It fell through to resolve_seed,
+    which now weighs rivals by SCRAPING them — so one profile read fired two
+    actor runs and the budget counted one of them."""
+    from app.services.grounding import check_handle
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@unclegagoclips", "Uncle Gago clips"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        check_handle("unclegago", "tiktok", settings=_settings())
+
+    actor.assert_not_called()
 
 
 def test_a_name_that_already_resolves_free_never_reaches_the_paid_check():

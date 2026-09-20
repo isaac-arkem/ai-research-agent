@@ -1854,10 +1854,18 @@ class ResolvedSeed:
     handle: str
     platform: str
     url: str
+    # False when the account was the only plausible one but nothing vouched
+    # for it. An ordinary creator is not verified, so refusing the unverified
+    # outright would lose exactly the people most worth researching.
+    confirmed: bool = True
 
 
 def resolve_seed(
-    name: str, *, settings, timeout: Optional[float] = None
+    name: str,
+    *,
+    settings,
+    timeout: Optional[float] = None,
+    verify: bool = True,
 ) -> Optional[ResolvedSeed]:
     """Turn a bare name into a real account, or return None.
 
@@ -1929,9 +1937,10 @@ def resolve_seed(
     #
     # What cannot be forged is the account. Below, the rivals are weighed by
     # what they actually are.
-    verified = _verify_seed(label, candidates, want, settings=settings)
-    if verified:
-        return verified
+    if verify:
+        weighed = _verify_seed(label, candidates, want, settings=settings)
+        if weighed:
+            return weighed
 
     logger.info("web grounding: %r did not resolve to an account", label)
     return None
@@ -1996,26 +2005,49 @@ def _verify_seed(
         return None
 
     best = None
+    alive: List[str] = []
     for item in (raw or {}).get("items") or []:
         slug = str(item.get("author_name") or "").strip().lstrip("@").lower()
-        if slug not in rivals or not item.get("author_verified"):
+        if slug not in rivals:
+            continue
+        if slug not in alive:
+            alive.append(slug)               # it exists and it posts
+        if not item.get("author_verified"):
             continue
         fans = item.get("author_fans")
         fans = float(fans) if isinstance(fans, (int, float)) and not isinstance(fans, bool) else 0.0
         if best is None or fans > best[1]:
             best = (slug, fans)
-    if not best:
-        logger.info("web grounding: none of %s is verified, so %r stays unresolved",
-                    rivals, label)
-        return None
+    if best:
+        logger.info("web grounding: %r resolves to @%s on tiktok "
+                    "(verified, %d followers, beat %s)",
+                    label, best[0], int(best[1]),
+                    [r for r in rivals if r != best[0]])
+        return ResolvedSeed(
+            name=label, handle=best[0], platform="tiktok",
+            url=profile_url(best[0], "tiktok"), confirmed=True,
+        )
 
-    logger.info("web grounding: %r resolves to @%s on tiktok "
-                "(verified, %d followers, beat %s)",
-                label, best[0], int(best[1]), [r for r in rivals if r != best[0]])
-    return ResolvedSeed(
-        name=label, handle=best[0], platform="tiktok",
-        url=profile_url(best[0], "tiktok"),
-    )
+    # Nobody is verified. Most people are not: @uncle.gago is somebody the
+    # operator has every right to research, and refusing every unverified
+    # account would lose exactly the ordinary creators this tool is for.
+    #
+    # So one candidate and one only. With a single plausible account there is
+    # nothing to choose between, and it goes back marked unconfirmed for the
+    # operator to correct. With several there IS a choice, and making it by
+    # follower count is a guess — which is how @billburrbits would be handed
+    # back as Bill Burr.
+    if len(alive) == 1:
+        logger.info("web grounding: %r resolves to @%s on tiktok "
+                    "(unconfirmed — nothing verified it)", label, alive[0])
+        return ResolvedSeed(
+            name=label, handle=alive[0], platform="tiktok",
+            url=profile_url(alive[0], "tiktok"), confirmed=False,
+        )
+
+    logger.info("web grounding: %d unverified rivals for %r (%s), so it stays "
+                "unresolved rather than guessed", len(alive), label, alive)
+    return None
 
 
 @dataclass
@@ -2086,7 +2118,13 @@ def check_handle(
 
     # Nothing points at it. The handle is usually the name with the spelling
     # rubbed off, so it is also the best thing we have to search on.
-    alternative = resolve_seed(label, settings=settings, timeout=timeout)
+    # verify=False: this is a REMARK, and a remark may not start a paid actor
+    # run. It did — one profile read fired two actor runs and the budget
+    # counted one of them, because the free search fell through to a check
+    # that weighs rivals by scraping them.
+    alternative = resolve_seed(
+        label, settings=settings, timeout=timeout, verify=False,
+    )
     if alternative and _norm_subject(alternative.handle) == want:
         alternative = None                    # it resolved to itself; no news
     logger.info("web grounding: nothing points at @%s on %s (alternative: %s)",
@@ -3137,10 +3175,14 @@ def gather_web_context(
             # message if we are wrong.
             said = None
             if resolved:
+                where = _PLATFORM_LABEL.get(resolved.platform, resolved.platform)
                 said = (
-                    f"Taking {resolved.name} to be @{resolved.handle} on "
-                    f"{_PLATFORM_LABEL.get(resolved.platform, resolved.platform)}. "
+                    f"Taking {resolved.name} to be @{resolved.handle} on {where}. "
                     "Not who you meant? Give me their handle."
+                ) if resolved.confirmed else (
+                    f"@{resolved.handle} on {where} is the only account I could "
+                    f"find for {resolved.name}, and nothing confirms it is them. "
+                    "Give me their handle if it is not."
                 )
             return WebContext(
                 action="ask",
