@@ -3765,3 +3765,62 @@ def test_no_tags_typed_means_the_planner_decides_alone():
                           model="gpt-4o-mini", timeout=15.0)
 
     assert got["hashtags"] == []
+
+
+# --------------------------------------------------------------------------
+# Our bugs must not look like Apify having a quiet afternoon
+# --------------------------------------------------------------------------
+
+def test_a_programming_error_is_logged_as_a_bug_with_a_traceback(caplog):
+    """A variable referenced in a function it does not live in came out as
+    "research engine failed: name 'routed' is not defined" at WARNING, and
+    the turn answered quietly without the lanes. It reads exactly like
+    Apify being down."""
+    import logging
+    from app.services.grounding import seed_signals
+
+    with caplog.at_level(logging.WARNING, logger="app.services.grounding"), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               side_effect=NameError("name 'routed' is not defined")):
+        tags, note, profile = seed_signals(["a"], "instagram", settings=_settings())
+
+    assert (tags, profile) == ([], "")            # still swallowed
+    bug = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bug, "a NameError was logged at WARNING, like an upstream failure"
+    assert "BUG" in bug[0].getMessage()
+    assert bug[0].exc_info, "no traceback, so there is nothing to fix it from"
+
+
+def test_an_upstream_failure_stays_a_warning(caplog):
+    """The resilience is the point. Apify down, Tavily timing out, a model
+    returning a shape we did not expect — all still one quiet line."""
+    import logging
+    from app.services.grounding import seed_signals
+
+    for boom in (TimeoutError("read timed out"),
+                 ConnectionError("apify unreachable"),
+                 TypeError("'NoneType' object is not subscriptable"),
+                 KeyError("items")):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="app.services.grounding"), \
+             patch("app.services.grounding._engine_config",
+                   return_value={"APIFY_API_TOKEN": "apify-test"}), \
+             patch("app.services.research.engine.apify_social.search_instagram_apify",
+                   side_effect=boom):
+            seed_signals(["a"], "instagram", settings=_settings())
+
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], boom
+        assert [r for r in caplog.records if r.levelno == logging.WARNING], boom
+
+
+def test_every_swallowing_fallback_tells_them_apart():
+    """Sixteen places catch Exception and return something safe. A bug in any
+    one of them is invisible, so none of them may log a bare warning."""
+    import re
+    from pathlib import Path
+
+    src = Path("app/services/grounding.py").read_text()
+    bare = re.findall(r'logger\.warning\("web grounding: [^"]*"[^)]*, exc\)', src)
+    assert not bare, f"these swallow a bug as a warning: {bare}"

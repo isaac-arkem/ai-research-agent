@@ -70,6 +70,37 @@ from app.utils.json_extract import extract_json_object
 
 logger = logging.getLogger(__name__)
 
+# A NameError is not the world failing, it is us.
+#
+# Every fallback in this module catches Exception, logs a warning and returns
+# something safe, which is deliberate: grounding is an upgrade to the plan and
+# never a dependency of it. But it means "Apify is down" and "a variable was
+# referenced in a function it does not live in" come out identically — one
+# line at WARNING, and a turn that answers quietly without the lanes. That
+# exact bug shipped for a few minutes today and two tests caught it by
+# noticing the engine had gone silent. Nothing else would have.
+#
+# So the unambiguous ones get logged as what they are, at ERROR, with the
+# traceback. Still swallowed — the fallback is the whole point and several
+# turns depend on it — but impossible to mistake for a quiet afternoon at
+# Apify.
+#
+# ONLY the unambiguous ones. A TypeError, KeyError or AttributeError is just
+# as likely to be a model returning a shape we did not expect, and those must
+# go on being swallowed without ceremony.
+_OUR_FAULT = (NameError, UnboundLocalError, ImportError, SyntaxError)
+
+
+def _log_failure(message: str, *args, exc: BaseException) -> None:
+    """Warning when the world broke, error with a traceback when we did."""
+    if isinstance(exc, _OUR_FAULT):
+        logger.error("BUG (not an upstream failure) — " + message,
+                     *args, exc_info=exc)
+    else:
+        logger.warning(message, *args)
+
+
+
 # A whole page of markdown per result would swamp the planner's context and
 # push the actual instructions out of the model's attention. The snippet is
 # the relevance-selected part; the page body is supporting detail, so it is
@@ -903,7 +934,7 @@ def synthesise_findings(
             response_format={"type": "json_object"},
         )
     except Exception as exc:
-        logger.warning("web grounding: synthesis failed: %s", exc)
+        _log_failure("web grounding: synthesis failed: %s", exc, exc=exc)
         return None
 
     parsed = extract_json_object(response.choices[0].message.content or "")
@@ -995,7 +1026,7 @@ def respond_from_thread(
         )
         parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
-        logger.warning("web grounding: respond failed, planning unaided: %s", exc)
+        _log_failure("web grounding: respond failed, planning unaided: %s", exc, exc=exc)
         return (None, None)
 
     reply = str(parsed.get("reply") or "").strip()
@@ -1439,7 +1470,7 @@ def propose_comparison_bases(
         )
         parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
-        logger.warning("web grounding: comparison-basis proposal failed: %s", exc)
+        _log_failure("web grounding: comparison-basis proposal failed: %s", exc, exc=exc)
         return []
 
     rows = parsed.get("bases")
@@ -1506,7 +1537,7 @@ def extract_markets(
         )
         parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
-        logger.warning("web grounding: market extraction failed: %s", exc)
+        _log_failure("web grounding: market extraction failed: %s", exc, exc=exc)
         return []
 
     rows = parsed.get("markets")
@@ -1897,7 +1928,7 @@ def _extract_if_wanted(
         )
         return _drop_news_subjects(creators), hashtags, []
     except Exception as exc:
-        logger.warning("web grounding: extraction failed: %s", exc)
+        _log_failure("web grounding: extraction failed: %s", exc, exc=exc)
         return [], [], []
 
 
@@ -2017,7 +2048,7 @@ def resolve_seed(
             timeout=timeout or getattr(settings, "search_timeout", 15.0),
         ))
     except Exception as exc:
-        logger.warning("web grounding: seed resolution failed for %r: %s", label, exc)
+        _log_failure("web grounding: seed resolution failed for %r: %s", label, exc, exc=exc)
         return None
 
     want = _norm_subject(label)
@@ -2124,7 +2155,7 @@ def _verify_seed(
             "", "", "", depth="quick", token=token, creators=rivals[:5],
         )
     except Exception as exc:
-        logger.warning("web grounding: could not weigh %s: %s", rivals, exc)
+        _log_failure("web grounding: could not weigh %s: %s", rivals, exc, exc=exc)
         return None
 
     best = None
@@ -2222,7 +2253,7 @@ def check_handle(
             timeout=timeout or getattr(settings, "search_timeout", 15.0),
         ))
     except Exception as exc:
-        logger.warning("web grounding: could not check @%s: %s", label, exc)
+        _log_failure("web grounding: could not check @%s: %s", label, exc, exc=exc)
         return None
 
     want = _norm_subject(label)
@@ -2344,7 +2375,7 @@ def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBas
             timeout=settings.search_timeout,
         )
     except Exception as exc:  # never break the turn over an optional extra
-        logger.warning("web grounding: comparison bases failed: %s", exc)
+        _log_failure("web grounding: comparison bases failed: %s", exc, exc=exc)
         return []
     # Logged every time: "no options appeared" has several causes and they are
     # indistinguishable from the outside.
@@ -2535,7 +2566,7 @@ def drop_irrelevant_creators(
         )
         parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
-        logger.warning("web grounding: relevance filter failed: %s", exc)
+        _log_failure("web grounding: relevance filter failed: %s", exc, exc=exc)
         return creators
 
     rows = parsed.get("drop")
@@ -3048,7 +3079,7 @@ def _tags_worth_sweeping(
         )
         parsed = extract_json_object(response.choices[0].message.content or "")
     except Exception as exc:
-        logger.warning("web grounding: could not weigh the seed tags: %s", exc)
+        _log_failure("web grounding: could not weigh the seed tags: %s", exc, exc=exc)
         return []
 
     allowed = {t.lower(): t for t in tags}
@@ -3107,7 +3138,7 @@ def seed_signals(
                 "", "", "", depth="quick", token=token, ig_creators=wanted,
             )
     except Exception as exc:
-        logger.warning("web grounding: could not read the seeds %s: %s", wanted, exc)
+        _log_failure("web grounding: could not read the seeds %s: %s", wanted, exc, exc=exc)
         return [], None, ""
 
     lowered = {h.lower() for h in wanted}
@@ -3308,7 +3339,7 @@ def _research_via_engine(
         )
         search_ms = int((time.perf_counter() - started) * 1000)
     except Exception as exc:
-        logger.warning("web grounding: research engine failed: %s", exc)
+        _log_failure("web grounding: research engine failed: %s", exc, exc=exc)
         return None
 
     if not result.candidates:
@@ -3484,7 +3515,7 @@ def gather_web_context(
         )
         triage_ms = int((time.perf_counter() - started) * 1000)
     except Exception as exc:
-        logger.warning("web grounding: triage failed, planning unaided: %s", exc)
+        _log_failure("web grounding: triage failed, planning unaided: %s", exc, exc=exc)
         return WebContext(action="skip", reason=f"triage failed: {exc}")
 
     # Never ask for something the operator has already written.
@@ -3783,10 +3814,10 @@ def gather_web_context(
     except SearchError as exc:
         # Expected badness: a block, a quota, a bad key. Already logged with
         # detail by the provider — the planner just carries on without it.
-        logger.warning("web grounding: search unavailable, planning unaided: %s", exc)
+        _log_failure("web grounding: search unavailable, planning unaided: %s", exc, exc=exc)
         return WebContext(action="skip", reason=f"search unavailable: {exc}")
     except Exception as exc:
-        logger.warning("web grounding: search crashed, planning unaided: %s", exc)
+        _log_failure("web grounding: search crashed, planning unaided: %s", exc, exc=exc)
         return WebContext(action="skip", reason=f"search crashed: {exc}")
 
     findings = _worth_reading([_to_finding(r) for r in results[:MAX_FINDINGS]])
