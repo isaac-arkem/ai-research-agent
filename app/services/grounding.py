@@ -2438,6 +2438,18 @@ Return JSON: {"drop": [{"n": <number>, "why": "<a few words>"}]}
 
 DROP ONLY WHAT YOU CAN JUSTIFY. A blog about a subject is not a creator in it. A radio station is not a comedian. A shop is not a musician. Someone plainly from a different country, when the question named one, does not belong.
 
+WHEN YOU ARE TOLD WHAT THE SEED ACCOUNT IS LIKE, JUDGE AGAINST THAT, NOT AGAINST THE TOPIC WORD.
+
+"creators similar to @iamhamamat" without knowing who she is leaves only the word "beauty" to judge on, and under that a photograph of flowers tagged #naturalbeauty is a beauty account, a landscape at dusk is a beauty account, and a jar of skin-lightening cream is a beauty account. All three came back. Told what she actually posts — African heritage, Ghanaian womanhood, her own face and work — none of them survives the question "is this the same kind of account?".
+
+The seed is a PERSON MAKING CONTENT. So ask of each one: is this an account of the same kind, making the same sort of thing, for the same sort of audience?
+
+  a photographer shooting beautiful women is not a beauty creator, they are a photographer
+  a brand selling soap, cream, gloss or perfume is not a creator, it is a shop
+  a salon or a retreat advertising its services is a business
+  a picture of flowers, a landscape, a pet or a car is not about a person at all
+  a post in a language and place with no connection to the request is somebody else's feed
+
 KEEP ANYTHING YOU ARE UNSURE OF. A name and one line of context is thin evidence, and a creator wrongly dropped is invisible to the operator — they cannot see what is not there, while an irrelevant one they can see and ignore. When the line says nothing either way, keep it.
 
 KEEP SMALL ACCOUNTS. Few followers is not irrelevance. Unless the operator asked for size, an account with two hundred followers doing exactly the right thing is an answer.
@@ -2452,6 +2464,7 @@ def drop_irrelevant_creators(
     openai_key: str,
     model: str = "gpt-4o-mini",
     timeout: float = 20.0,
+    seed_profile: str = "",
 ) -> List[Creator]:
     """Remove the ones that do not answer the question that was asked.
 
@@ -2479,7 +2492,12 @@ def drop_irrelevant_creators(
             model=model,
             messages=[
                 {"role": "system", "content": RELEVANCE_SYSTEM},
-                {"role": "user", "content": f"The operator asked: {question}\n\nAccounts:\n{listed}"},
+                {"role": "user", "content": (
+                    f"The operator asked: {question}\n\n"
+                    + (f"What the account they named is actually like:\n{seed_profile}\n\n"
+                       if seed_profile else "")
+                    + f"Accounts:\n{listed}"
+                )},
             ],
             temperature=0,
             response_format={"type": "json_object"},
@@ -2953,10 +2971,10 @@ def seed_signals(
     wanted = [str(h).strip().lstrip("@") for h in (seeds or []) if str(h).strip()]
     wanted = [h for h in wanted if h][:3]
     if not wanted or platform not in ("instagram", "tiktok"):
-        return [], None
+        return [], None, ""
     token = (_engine_config(settings) or {}).get("APIFY_API_TOKEN")
     if not token:
-        return [], None
+        return [], None, ""
 
     from app.services.research.engine import apify_social
 
@@ -2971,11 +2989,12 @@ def seed_signals(
             )
     except Exception as exc:
         logger.warning("web grounding: could not read the seeds %s: %s", wanted, exc)
-        return [], None
+        return [], None, ""
 
     lowered = {h.lower() for h in wanted}
     counts: dict = {}
     seen_authors = set()
+    captions: List[str] = []
     for item in (raw or {}).get("items") or []:
         author = str(item.get("author_name") or "").strip().lstrip("@").lower()
         # Only THEIR posts. The lanes return whoever the actor felt like
@@ -2984,6 +3003,10 @@ def seed_signals(
         if author not in lowered:
             continue
         seen_authors.add(author)
+        text = str(item.get("text") or item.get("caption_snippet") or "").strip()
+        text = " ".join(text.split())
+        if text and len(captions) < 8:
+            captions.append(f"@{author}: {text[:150]}")
         for tag in item.get("hashtags") or []:
             # "KingsandQueens:" came back with the colon attached, and a tag
             # with punctuation in it matches nothing at all.
@@ -3009,8 +3032,20 @@ def seed_signals(
             "below is built on the words of the request rather than on what "
             "they post."
         )
+    # What the filter needs in order to judge "is this the same KIND of
+    # account". Without it the only word it has is the topic, and under
+    # "beauty" a photograph of flowers tagged #naturalbeauty is a beauty
+    # account. One was returned.
+    profile = ""
+    if seen_authors:
+        lines = [
+            ", ".join("@" + h for h in wanted if h.lower() in seen_authors)
+            + " post under: " + (", ".join("#" + t for t in tags) or "no tags we could read")
+        ]
+        lines += ["  " + c for c in captions]
+        profile = "\n".join(lines)
     logger.info("web grounding: seeds %s use %s", wanted, tags or "no tags we could read")
-    return tags, note
+    return tags, note, profile
 
 
 def _research_via_engine(
@@ -3037,6 +3072,7 @@ def _research_via_engine(
     """
     from app.services.research import orchestrator, reasoning
 
+    seed_profile = ""
     try:
         client = reasoning.build_reasoning_client(settings)
         model = getattr(settings, "research_plan_model", "gpt-4o")
@@ -3071,8 +3107,9 @@ def _research_via_engine(
                 e.lstrip("@").casefold() for e in (exclude or [])
             }
         ]
+        seed_profile = ""
         if positive and lanes:
-            seed_tags, seed_note = seed_signals(
+            seed_tags, seed_note, seed_profile = seed_signals(
                 positive, lanes[0], settings=settings, topic=query.text,
             )
             # A handle they typed is exact, which is not the same as right.
@@ -3198,6 +3235,7 @@ def _research_via_engine(
         openai_key=settings.openai_api_key,
         model=settings.grounding_model,
         timeout=float(getattr(settings, "search_timeout", 15.0)),
+        seed_profile=seed_profile,
     )
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,

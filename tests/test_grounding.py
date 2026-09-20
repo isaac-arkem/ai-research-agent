@@ -3400,7 +3400,7 @@ def test_the_hunt_uses_the_tags_the_seed_actually_posts():
                    ("iamhamamat", ["ProtectShea", "Accra", "ProtectShea"]),
                    ("iamhamamat", ["ProtectShea", "Accra"]),
                )) as actor:
-        tags, note = seed_signals(["@iamhamamat"], "instagram", settings=_settings())
+        tags, note, _ = seed_signals(["@iamhamamat"], "instagram", settings=_settings())
 
     assert tags[0] == "protectshea"      # most used first
     assert "accra" in tags
@@ -3422,7 +3422,7 @@ def test_a_stranger_in_the_results_does_not_get_a_vote():
                    ("iamhamamat", ["ProtectShea"]),
                    ("someshop", ["lashes", "lipkits", "sale"]),
                )):
-        tags, _ = seed_signals(["iamhamamat"], "instagram", settings=_settings())
+        tags, _, _ = seed_signals(["iamhamamat"], "instagram", settings=_settings())
 
     assert tags == ["protectshea"]
 
@@ -3436,7 +3436,7 @@ def test_a_seed_that_cannot_be_read_says_so():
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_instagram_apify",
                return_value=_posts(("someoneelse", ["x"]))):
-        tags, note = seed_signals(["iamhamamat"], "instagram", settings=_settings())
+        tags, note, _ = seed_signals(["iamhamamat"], "instagram", settings=_settings())
 
     assert tags == []
     assert note and "@iamhamamat" in note and "rather than on what" in note
@@ -3452,7 +3452,7 @@ def test_punctuation_never_becomes_a_hashtag():
                return_value={"APIFY_API_TOKEN": "apify-test"}), \
          patch("app.services.research.engine.apify_social.search_instagram_apify",
                return_value=_posts(("a", ["KingsandQueens:", "#Accra", "ok"]))):
-        tags, _ = seed_signals(["a"], "instagram", settings=_settings())
+        tags, _, _ = seed_signals(["a"], "instagram", settings=_settings())
 
     assert "kingsandqueens" in tags and "accra" in tags
     assert all(t.isalnum() or "_" in t for t in tags)
@@ -3476,9 +3476,9 @@ def test_no_token_or_no_platform_means_no_paid_call():
 
     with patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
         with patch("app.services.grounding._engine_config", return_value={}):
-            assert seed_signals(["a"], "tiktok", settings=_settings()) == ([], None)
-        assert seed_signals(["a"], "youtube", settings=_settings()) == ([], None)
-        assert seed_signals([], "tiktok", settings=_settings()) == ([], None)
+            assert seed_signals(["a"], "tiktok", settings=_settings()) == ([], None, "")
+        assert seed_signals(["a"], "youtube", settings=_settings()) == ([], None, "")
+        assert seed_signals([], "tiktok", settings=_settings()) == ([], None, "")
     actor.assert_not_called()
 
 
@@ -3537,3 +3537,44 @@ def test_no_judgement_falls_back_to_the_planner_rather_than_sweeping_anyway():
     with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("down")):
         assert _tags_worth_sweeping(["explore", "beauty"], ["a"], "t",
                                     settings=_settings()) == []
+
+
+def test_the_filter_is_told_what_the_seed_is_actually_like():
+    """"creators similar to @iamhamamat" with no idea who she is leaves only
+    the word "beauty" to judge on — and under that a photograph of FLOWERS
+    tagged #naturalbeauty is a beauty account, as is a landscape at dusk and
+    a jar of skin-lightening cream. All three came back."""
+    from app.services.grounding import seed_signals
+
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value={"items": [
+                   {"text": "Shea butter made by the women of my village",
+                    "author_name": "iamhamamat", "hashtags": ["ProtectShea"]},
+               ]}):
+        tags, note, profile = seed_signals(
+            ["iamhamamat"], "instagram", settings=_settings(), topic="beauty creators")
+
+    assert "@iamhamamat" in profile
+    assert "#protectshea" in profile.lower()
+    assert "Shea butter made by the women" in profile
+
+
+def test_the_seed_profile_reaches_the_filter():
+    from app.services.grounding import drop_irrelevant_creators
+    from app.models.domain import Creator
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"drop": []}')) as llm:
+        drop_irrelevant_creators(
+            [Creator(name="a", handle="a", why="x"),
+             Creator(name="b", handle="b", why="y")],
+            "beauty creators similar to @iamhamamat",
+            openai_key="sk-test", seed_profile="@iamhamamat post under: #protectshea",
+        )
+
+    sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][1]
+    assert "#protectshea" in sent["content"]
+    assert "What the account they named is actually like" in sent["content"]
