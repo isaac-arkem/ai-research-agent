@@ -131,7 +131,18 @@ class Settings(BaseSettings):
     # pipeline, decides what to do. The model chooses WHAT; these choose what
     # it may COST. Both are enforced inside the tools, so a prompt cannot talk
     # its way past them.
-    tools_max_paid_calls: int = 2
+    # Off by default. On, the model works the turn with tools instead of
+    # walking the fixed pipeline — same response contract either way, so this
+    # switches back in one variable if it misbehaves.
+    research_tools_enabled: bool = False
+    # How many tool calls one turn may make before it has to answer with what
+    # it has. A loop that cannot be bounded is a bill that cannot be bounded.
+    tools_max_steps: int = 8
+    # Four, not two. The pattern that works is look-then-search: read the
+    # accounts the operator named, then search for people like them. Two seeds
+    # spent the whole budget before any searching could start, so the turn
+    # ended having described the seeds and found nobody.
+    tools_max_paid_calls: int = 4
     tools_max_searches: int = 4
 
     # Apify — used only to refresh the geo-targetable country list at startup.

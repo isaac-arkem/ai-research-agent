@@ -210,6 +210,80 @@ def search_social(tc: ToolContext, platform: str, query: str) -> str:
     return f"{len(fresh)} accounts from {platform}:\n" + "\n".join(lines)
 
 
+def profile(tc: ToolContext, handle: str, platform: str) -> str:
+    """What one named account actually posts.
+
+    The gap that made the loop scrape blindly. Asked for "creators like
+    @janedoe", it had no way to find out what @janedoe is like — only a
+    hashtag sweep — so it swept "beauty" and returned fifty-nine strangers.
+
+    Gated on the BUDGET but not on the operator naming a platform, unlike
+    search_social. The distinction is what was named: sweeping a hashtag is a
+    fishing trip on a platform they chose, while this reads an account they
+    named themselves. Making them also name the platform would be asking for
+    something more general than what they already gave.
+    """
+    from app.services.research.engine import apify_social
+
+    handle = (handle or "").strip().lstrip("@")
+    platform = (platform or "").strip().lower()
+    if not handle:
+        return "no handle given."
+    if platform not in {"instagram", "tiktok"}:
+        return f"cannot read profiles on {platform!r}. Only instagram and tiktok."
+    if tc.paid_calls >= tc.max_paid:
+        return (
+            f"refused: the paid budget for this turn is spent ({tc.paid_calls} of "
+            f"{tc.max_paid}). Answer with what you have."
+        )
+
+    tc.paid_calls += 1
+    token = orchestrator_config(tc).get("APIFY_API_TOKEN")
+    if not token:
+        return "no Apify token configured, so profiles cannot be read."
+    window = ("", "")
+    try:
+        if platform == "tiktok":
+            raw = apify_social.search_tiktok_apify(
+                handle, *window, depth="quick", token=token, creators=[handle]
+            )
+        else:
+            raw = apify_social.search_instagram_apify(
+                handle, *window, depth="quick", token=token, ig_creators=[handle]
+            )
+    except Exception as exc:
+        logger.warning("tools: profile(%s on %s) failed: %s", handle, platform, exc)
+        return f"could not read @{handle} on {platform}: {type(exc).__name__}."
+
+    items = (raw or {}).get("items") or []
+    tc.lane_status[platform] = "ok" if items else "no-results"
+    if not items:
+        error = (raw or {}).get("error")
+        return (
+            f"@{handle} on {platform} returned no posts"
+            + (f" ({error})" if error else ". The account may be private, renamed, or misspelled.")
+        )
+
+    followers = next(
+        (i.get("author_fans") for i in items if i.get("author_fans")), None
+    )
+    tags: List[str] = []
+    for item in items:
+        for tag in item.get("hashtags") or []:
+            if tag and tag not in tags:
+                tags.append(tag)
+    lines = []
+    for item in items[:8]:
+        text = (item.get("text") or item.get("caption_snippet") or "").strip()
+        lines.append(f"- {text[:160]}" if text else "- (no caption)")
+    head = f"@{handle} on {platform}: {len(items)} recent posts"
+    if followers:
+        head += f", {int(followers):,} followers"
+    if tags:
+        head += f"\nhashtags they use: {', '.join('#' + t for t in tags[:12])}"
+    return head + "\nrecent captions:\n" + "\n".join(lines)
+
+
 def orchestrator_config(tc: ToolContext) -> dict:
     from app.services.grounding import _engine_config
 
@@ -343,11 +417,25 @@ TOOL_SCHEMAS: List[dict] = [
     ),
     _fn(
         "resolve_account",
-        "Turn a person's name into their account. Use it when the operator names "
-        "someone without an @handle and you need to know who they mean or which "
-        "platform they are on. Returns nothing rather than guessing.",
+        "Work out which account a person is, from their name. Use it whenever the "
+        "operator names someone and you do not know their handle or which platform "
+        "they are on. Returns nothing rather than guessing at a wrong account.",
         {"name": {"type": "string", "description": "The person's name, without an @"}},
         ["name"],
+    ),
+    _fn(
+        "profile",
+        "Read a specific account: what it posts, the hashtags it uses, and its "
+        "follower count where the platform gives one. THIS COSTS MONEY. Use it "
+        "when the operator names an account and the answer depends on what that "
+        "account is actually like — finding people similar to it, comparing two of "
+        "them, or checking it is who you think. Do this BEFORE searching for people "
+        "like someone: a hashtag sweep cannot tell you what they are like.",
+        {
+            "handle": {"type": "string", "description": "The account handle, with or without the @"},
+            "platform": {"type": "string", "enum": ["instagram", "tiktok"]},
+        },
+        ["handle", "platform"],
     ),
     _fn(
         "extract_creators",
@@ -399,6 +487,7 @@ _DISPATCH: Dict[str, Callable] = {
     "resolve_account": resolve_account,
     "extract_creators": extract_creators,
     "extract_markets": extract_markets,
+    "profile": profile,
 }
 
 
