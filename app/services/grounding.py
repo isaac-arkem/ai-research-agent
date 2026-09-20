@@ -96,7 +96,7 @@ TRIAGE_SYSTEM = """You route one turn of a social-listening research conversatio
 
 Return exactly one of these JSON shapes:
 
-{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "exclude_accounts": ["handles they asked NOT to be like, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>}
+{"action": "search", "topic": "...", "country": "ISO-2 or null", "window": "d|w|m|y or null", "answer": "markets|creators|overview", "subjects": ["named people, or []"], "reference_accounts": ["handles used as a yardstick, or []"], "exclude_accounts": ["handles they asked NOT to be like, or []"], "platform": "instagram|tiktok|both|null", "max_followers": <number or null>, "min_followers": <number or null>, "window_days": <number or null>, "rank_by": "followers|engagement_rate|null"}
 {"action": "ask", "question": "...", "missing": ["country"]}
 {"action": "respond", "reason": "..."}
 {"action": "plan", "reason": "..."}
@@ -202,6 +202,18 @@ Both sides of a "like @a but not like @b" are references: @b is still a yardstic
 "exclude_accounts" IS THE ONES THEY ASKED NOT TO BE LIKE. A subset of reference_accounts, never anything else. "like @a but not like @b" -> reference_accounts ["a","b"], exclude_accounts ["b"]. Empty when they only said who they DO want.
 
 An account is a reference even when they never used a comparison word. "the @iamhamamat of Kenya" is asking for somebody else entirely.
+
+"window_days" IS HOW FAR BACK THEY ASKED YOU TO LOOK, IN DAYS.
+
+"in the last 30 days" is 30. "this week" is 7. "this year" is 365. "recently" and "lately" are 90 — close enough to act on and honest about being a guess. null when they said nothing about time, which leaves the default alone.
+
+Not the same as "window", which is a coarse bucket for the web search. A month is 30 days and there is no bucket for that, so the number is what the scrape lanes get.
+
+"rank_by" IS WHICH ORDER THEY ASKED THE LIST IN.
+
+"engagement_rate" when they asked for the most engaging, the best engagement, the highest engagement rate, the most interaction per follower — anything about how hard an audience reacts rather than how many there are. "followers" when they asked for the biggest, the most popular, the top accounts. null when they did not say, which leaves the default order alone.
+
+The two are close to OPPOSITE. A two-million-follower account usually has a LOWER engagement rate than one with twenty thousand, so answering "highest engagement rate" with the biggest accounts returns close to the reverse of what was asked.
 
 "max_followers" / "min_followers" IS THE SIZE THEY ASKED FOR, AS A NUMBER.
 
@@ -636,6 +648,12 @@ def _route_once(
         "platform": lane if lane in ("instagram", "tiktok", "both") else None,
         "max_followers": _count("max_followers"),
         "min_followers": _count("min_followers"),
+        "window_days": _count("window_days"),
+        "rank_by": (
+            str(parsed.get("rank_by") or "").strip().lower()
+            if str(parsed.get("rank_by") or "").strip().lower()
+            in ("followers", "engagement_rate") else None
+        ),
     }
 
 
@@ -2605,7 +2623,9 @@ def _merge_creators(first: List[Creator], second: List[Creator]) -> List[Creator
     return out
 
 
-def creators_from_post_authors(candidates) -> List[Creator]:
+def creators_from_post_authors(
+    candidates, rank_by: Optional[str] = None
+) -> List[Creator]:
     """The accounts that posted, as creators. No model in the loop.
 
     A social result already names its author: the Instagram actor returns
@@ -2650,6 +2670,21 @@ def creators_from_post_authors(candidates) -> List[Creator]:
             if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
         )
         rank = fans if fans is not None else 0.0
+        # ...unless they asked for the opposite. "The highest engagement rate"
+        # answered by follower count returns close to the reverse of the
+        # question: a two-million-follower account reacts less per follower
+        # than one with twenty thousand. Rate is what we already hold —
+        # likes, comments, shares and views against the audience behind them.
+        #
+        # Needs BOTH numbers. Instagram returns no follower count, so a rate
+        # cannot be computed there and those keep their audience ranking
+        # rather than being handed a made-up one.
+        if rank_by == "engagement_rate" and fans and fans > 0 and post_total > 0:
+            rate = post_total / fans
+            rank = rate
+            engagement_rate = rate
+        else:
+            engagement_rate = None
 
         seen = by_handle.get(handle.lower())
         if seen and seen[0] >= (rank, post_total):
@@ -2658,6 +2693,8 @@ def creators_from_post_authors(candidates) -> List[Creator]:
         verified = bool(meta.get("author_verified"))
         nickname = str(meta.get("author_nickname") or "").strip()
         why = []
+        if engagement_rate is not None:
+            why.append(f"{engagement_rate * 100:.1f}% engagement on {source}")
         if fans is not None:
             why.append(f"{int(fans):,} followers on {source}")
         if verified:
@@ -3063,6 +3100,8 @@ def _research_via_engine(
     ctx: Optional[AgentContext] = None,
     history: Optional[Sequence[ChatTurn]] = None,
     limit: Optional[tuple] = None,
+    window_days: Optional[int] = None,
+    rank_by: Optional[str] = None,
 ) -> Optional[WebContext]:
     """Run the multi-source engine. None when it has nothing to offer.
 
@@ -3153,8 +3192,12 @@ def _research_via_engine(
             config=_engine_config(settings),
             provider=client,
             model=model,
+            # The days THEY asked for. This was the config default, always,
+            # so "the last 30 days" was read by the router and then thrown
+            # away here — the scrape lanes searched a full year whatever the
+            # question said, and nothing in the reply mentioned it.
             window=orchestrator.window_for(
-                getattr(settings, "research_window_days", 365)
+                window_days or getattr(settings, "research_window_days", 365)
             ),
             depth=getattr(settings, "research_depth", "default"),
             country_name=(market.name if market else None),
@@ -3206,7 +3249,7 @@ def _research_via_engine(
     # creator cards would bury it.
     if answer != "markets":
         creators = _merge_creators(
-            creators_from_post_authors(result.candidates), creators
+            creators_from_post_authors(result.candidates, rank_by), creators
         )
     # One named person was asked about, so one named person is the answer.
     creators = _only_the_subjects(creators, subjects)
@@ -3626,6 +3669,8 @@ def gather_web_context(
             emit=emit, triage_ms=triage_ms, answer=answer, ctx=ctx,
             subjects=subjects, seeds=seeds, history=history, limit=_limit,
             exclude=routed.get("exclude_accounts") or [],
+            window_days=routed.get("window_days"),
+            rank_by=routed.get("rank_by"),
         )
         if engine_context is not None:
             return engine_context

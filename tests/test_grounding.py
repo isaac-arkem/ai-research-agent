@@ -3601,3 +3601,81 @@ def test_the_relevance_filter_uses_the_bigger_model():
 
     if filt.called:
         assert filt.call_args.kwargs["model"] == "gpt-4o"
+
+
+# --------------------------------------------------------------------------
+# How far back, and in what order
+# --------------------------------------------------------------------------
+
+def test_the_days_they_asked_for_reach_the_scrape_lanes():
+    """"in the last 30 days" was read by the router and then thrown away: the
+    engine was handed the CONFIG default, so the lanes searched a full year
+    whatever the question said, and nothing in the reply mentioned it.
+
+    "window" could not have carried it either — it is a d|w|m|y bucket and
+    there is no bucket for thirty days."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"t","answer":"creators","subjects":[],'
+              '"window":"m","window_days":30,"rank_by":"engagement_rate"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("UK TikTok creators in the last 30 days", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["window_days"] == 30
+    assert got["rank_by"] == "engagement_rate"
+
+
+def test_an_order_nobody_asked_for_is_not_invented():
+    from app.services.grounding import _route_once
+
+    routed = '{"action":"search","topic":"t","answer":"creators","subjects":[]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators in Ghana", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["window_days"] is None
+    assert got["rank_by"] is None
+
+
+def _candidate(handle, fans, likes, source="tiktok"):
+    from types import SimpleNamespace
+    item = SimpleNamespace(
+        source=source, author=handle, url=f"https://x/{handle}", title="", body="",
+        snippet="", engagement={"likes": likes},
+        metadata={"author_fans": fans, "author_verified": False,
+                  "author_nickname": handle, "hashtags": []},
+    )
+    return SimpleNamespace(source=source, source_items=[item])
+
+
+def test_engagement_rate_is_not_follower_count():
+    """A two-million-follower account reacts less per follower than one with
+    twenty thousand, so answering "highest engagement rate" with the biggest
+    accounts returns close to the reverse of the question."""
+    from app.services.grounding import creators_from_post_authors
+
+    cands = [
+        _candidate("huge", 2_000_000, 20_000),      # 1% engagement
+        _candidate("small", 20_000, 4_000),         # 20% engagement
+    ]
+    by_size = [c.handle for c in creators_from_post_authors(cands)]
+    by_rate = [c.handle for c in creators_from_post_authors(cands, "engagement_rate")]
+
+    assert by_size[0] == "huge"
+    assert by_rate[0] == "small"
+    assert "20.0% engagement" in [
+        c.why for c in creators_from_post_authors(cands, "engagement_rate")
+        if c.handle == "small"
+    ][0]
+
+
+def test_a_rate_needs_both_numbers_and_is_never_guessed():
+    """Instagram returns no follower count, so a rate cannot be computed
+    there — those keep their audience ranking rather than a made-up one."""
+    from app.services.grounding import creators_from_post_authors
+
+    cands = [_candidate("ig_person", None, 5_000, source="instagram")]
+    got = creators_from_post_authors(cands, "engagement_rate")
+
+    assert got and "engagement" not in got[0].why
