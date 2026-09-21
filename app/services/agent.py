@@ -1,6 +1,5 @@
 """Agent — sanitise, OpenAI Chat Completions, validate, classify flow."""
 
-import json
 import logging
 import re
 import time
@@ -20,25 +19,14 @@ from app.services.grounding import (
 from app.services.known_accounts import (
     handles_needing_platform,
     known_accounts_from_text,
-    continues_named_account_job,
-    names_accounts,
     platform_clarifying_question,
 )
 from app.services.prompt import assemble_system_prompt, build_chat_messages
 from app.services.validator import validate_research_plan
 from app.utils.guards import sanitize_prompt
+from app.utils.json_extract import extract_json_object
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_json(text: str) -> dict:
-    cleaned = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"```\s*$", "", cleaned, flags=re.IGNORECASE).strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("No JSON object found in LLM response")
-    return json.loads(cleaned[start : end + 1])
 
 
 # The plan comes back as one JSON object, and its first field is the one
@@ -127,23 +115,31 @@ def generate_research_plan(
     # a web search can only turn up different people with similar names — as
     # it did, offering three strangers called Isaac against a request for one.
     #
-    # Two checks, both narrow. This message naming accounts is unambiguous.
-    # So is answering a question we just asked ABOUT accounts already named:
-    # "instagram" names nothing on its own, but as the reply to "which
-    # platform is 'isaac' on?" it belongs to a job whose plan IS that account.
-    # Both are scoped to one exchange, so neither can silence research for the
-    # rest of the conversation — an earlier version did exactly that.
-    named_account_turn = names_accounts(sanitized) or continues_named_account_job(
-        sanitized, history
-    )
+    # The router sees every turn. It used to be skipped entirely whenever a
+    # regex found an "@" — and that bypass, not the model, caused most of what
+    # went wrong: "Find creators similar to @janedoe and @johnsmith" became a
+    # plan to scrape those two, "use @demibagby as a reference" the same, and
+    # "I dont want to scrape anything, just get me his accounts" produced the
+    # accounts @anything, @just, @get and @me.
+    #
+    # Measured before removing it: of the six cases the bypass protected, the
+    # router already gets five right on its own. The sixth — a bare field
+    # answer like "tech_giants" — is escalated to the larger model inside
+    # triage, which gets it right three times out of three.
+    #
+    # What the router decides is unchanged in effect: it returns "skip" for a
+    # real named-account job, and a skip falls through to the planner exactly
+    # as the bypass did.
+    #
+    # names_accounts and continues_named_account_job are gone with it. Once
+    # the router made the decision they were imported and never called, and
+    # both worked by matching words — the second one walked the thread
+    # deciding, from a list, whether a bare reply still belonged to a job
+    # about named accounts. That is a question about what the operator meant,
+    # and the router answers it with "subjects".
 
-    # Route the turn before planning it. A research question goes to the web
-    # first and comes back as findings for the operator to approve; only the
-    # turn after that draws a plan. Anything grounding cannot help with —
-    # including every way grounding can fail — falls through to the planner
-    # exactly as it ran before this existed.
     web = None
-    if settings is not None and not missing_platforms and not named_account_turn:
+    if settings is not None and not missing_platforms:
         web = gather_web_context(
             sanitized, ctx, history, settings=settings, on_progress=on_progress
         )
@@ -284,10 +280,10 @@ def generate_research_plan(
         )
     except Exception as exc:
         logger.error("OpenAI call failed: %s", exc)
-        return _fail(f"OpenAI call failed: {exc}", "openai_failed", started=started)
+        return _fail("Upstream failed", "openai_failed", started=started)
 
     try:
-        parsed = _extract_json(raw_text)
+        parsed = extract_json_object(raw_text)
     except Exception:
         return _fail(
             "Failed to extract JSON from LLM response",

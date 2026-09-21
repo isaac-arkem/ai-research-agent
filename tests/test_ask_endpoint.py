@@ -4,6 +4,7 @@ from uuid import uuid4
 from app.core.config import get_settings
 from app.main import app
 from app.models.domain import AgentResult, ValidationError_, ValidationResult
+from app.models.requests import MAX_HISTORY_CONTENT, MAX_HISTORY_TURNS
 from tests.plans import discovery_plan, success_result
 
 
@@ -135,6 +136,82 @@ def test_openai_failure_is_502(mock_gen, client):
     response = client.post("/ask", json={"prompt": "find creators"})
     assert response.status_code == 502
     assert response.json()["code"] == "openai_failed"
+    assert response.json()["error"] == "Upstream failed"
+    assert "timeout" not in response.json()["error"]
+
+
+@patch("app.api.v1.endpoints.research.generate_research_plan")
+def test_client_model_is_ignored(mock_gen, client):
+    mock_gen.return_value = _ok()
+    response = client.post(
+        "/ask", json={"prompt": "find creators", "model": "o1"}
+    )
+    assert response.status_code == 200
+    assert mock_gen.call_args.kwargs["model"] == get_settings().research_agent_model
+
+
+def test_history_turn_over_cap_is_422(client):
+    response = client.post(
+        "/ask",
+        json={
+            "prompt": "find creators",
+            "conversation_history": [
+                {"role": "user", "content": "x" * (MAX_HISTORY_CONTENT + 1)},
+            ],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+
+
+@patch("app.api.v1.endpoints.research.generate_research_plan")
+def test_a_plan_sized_history_turn_is_kept(mock_gen, client):
+    """A previous plan is thousands of characters. It must survive intact."""
+    mock_gen.return_value = _ok()
+    prior = "Plan for SA modest fashion. " * 100  # ~2.8k
+    assert len(prior) > 2000
+    response = client.post(
+        "/ask",
+        json={
+            "prompt": "Make it Instagram only",
+            "conversation_history": [
+                {"role": "user", "content": "Find fashion in SA"},
+                {"role": "assistant", "content": prior},
+            ],
+        },
+    )
+    assert response.status_code == 200
+    assert mock_gen.call_args.kwargs["history"][1].content == prior
+
+
+@patch("app.api.v1.endpoints.research.generate_research_plan")
+def test_a_long_brief_prompt_is_accepted(mock_gen, client):
+    """Operators paste a situation before the ask. 2000 chars was too tight."""
+    mock_gen.return_value = _ok()
+    brief = (
+        "We already scrape modest fashion in SA on Instagram. "
+        "Now we want TikTok in the same niche, same lookback, "
+        "but exclude anything that looks like a storefront. "
+    ) * 80
+    assert 2000 < len(brief) < 32_000
+    response = client.post("/ask", json={"prompt": brief})
+    assert response.status_code == 200
+    assert mock_gen.call_args.args[0] == brief
+
+
+def test_history_list_over_cap_is_422(client):
+    response = client.post(
+        "/ask",
+        json={
+            "prompt": "find creators",
+            "conversation_history": [
+                {"role": "user", "content": f"turn {i}"}
+                for i in range(MAX_HISTORY_TURNS + 1)
+            ],
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
 
 
 @patch("app.api.v1.endpoints.research.generate_research_plan")
@@ -180,13 +257,26 @@ def test_health(client):
     assert "auth_required" in body
 
 
-def test_ask_openapi_success_schema_does_not_repeat_plan(client):
-    spec = client.get("/openapi.json").json()
+def test_docs_are_off_outside_debug(client):
+    assert client.get("/docs").status_code == 404
+    assert client.get("/redoc").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+
+def test_ask_openapi_success_schema_does_not_repeat_plan():
+    from fastapi.testclient import TestClient
+
+    from app.main import create_app
+
+    debug_app = create_app(get_settings().model_copy(update={"debug": True}))
+    with TestClient(debug_app) as debug_client:
+        spec = debug_client.get("/openapi.json").json()
     schema = spec["components"]["schemas"]["AskResponse"]
     assert "plan" in schema["properties"]
     assert "validation" not in schema["properties"]
     assert "raw" not in schema["properties"]
     assert "error" not in schema["properties"]
+    assert "model" not in spec["components"]["schemas"]["AskRequest"]["properties"]
 
 
 def test_chat_ui(client):

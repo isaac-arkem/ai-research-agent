@@ -2051,20 +2051,6 @@ def test_a_list_of_people_is_a_creator_question_however_it_is_phrased():
     assert "Musicians, artists, singers" in TRIAGE_SYSTEM
 
 
-def test_both_tavily_paths_ask_for_the_same_thing():
-    """The vendored backend is primary; researchAgent's own provider is the
-    fallback when the engine returns nothing. Two implementations that
-    disagree on size and depth means the fallback silently returns a different
-    search than the primary."""
-    from app.core.config import get_settings
-    from app.services.research.engine import env
-
-    s = get_settings()
-    cfg = env.get_config()
-    assert cfg["TAVILY_MAX_RESULTS"] == s.search_results_per_query
-    assert cfg["TAVILY_SEARCH_DEPTH"] == s.search_depth
-
-
 def test_the_engine_web_lane_is_researchagents_own_tavily_provider():
     """There is one Tavily implementation, not two.
 
@@ -2098,6 +2084,7 @@ def test_the_web_lane_reads_the_same_settings_as_the_provider():
     s, cfg = get_settings(), env.get_config()
     assert cfg["TAVILY_MAX_RESULTS"] == s.search_results_per_query
     assert cfg["TAVILY_SEARCH_DEPTH"] == s.search_depth
+    assert cfg["TAVILY_TIMEOUT"] == s.search_timeout
 
 
 def test_the_platform_balance_rule_keeps_the_subject():
@@ -2564,10 +2551,13 @@ def test_a_bare_name_resolves_to_an_account_and_settles_the_platform():
 
 
 def test_a_name_that_does_not_match_the_handle_stays_unresolved():
-    """Measured, a looser rule resolved Kevin Hart to @imkevinhart, Bill Burr
-    to @wilfredburr and Shatta Wale to @shattawaleking. Naming the wrong
-    person back with confidence is worse than admitting we could not work it
-    out — unresolved just asks which platform, as it did before."""
+    """The free pass will not guess. A handle that is not the name is not
+    accepted on the strength of a page title, because a fan account is titled
+    after the person it follows — rebuilt strictly, that rule still resolved
+    Bill Burr to @billburrbits, a clips account.
+
+    With nothing to weigh the rivals against, unresolved is the answer, and
+    unresolved just asks which platform, as it did before."""
     from app.services.grounding import resolve_seed
 
     provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
@@ -2575,7 +2565,197 @@ def test_a_name_that_does_not_match_the_handle_stays_unresolved():
         ("https://www.instagram.com/kevinhartfans/", "Kevin Hart Fans"),
     ))
     with patch("app.services.grounding.provider_from_settings", return_value=provider):
+        assert resolve_seed(
+            "Kevin Hart", settings=_settings(seed_verification_enabled=False)
+        ) is None
+
+
+# --------------------------------------------------------------------------
+# Weighing rivals — what a URL cannot say, the account can
+# --------------------------------------------------------------------------
+
+def _rivals_provider():
+    """What "Shatta Wale" actually returns: three handles, all with his name
+    in them, one of them a news page."""
+    return SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@shattawaleking", "TikTok - Make Your Day"),
+        ("https://www.tiktok.com/@shattawalenews", "Shatta Wale News"),
+        ("https://www.instagram.com/shattawalenima/", "SHATTA WALE"),
+    ))
+
+
+def _actor(*accounts):
+    """accounts: (handle, fans, verified) -> what the actor hands back."""
+    return {"items": [
+        {"text": "post", "author_name": h, "author_fans": f, "author_verified": v}
+        for h, f, v in accounts
+    ]}
+
+
+def test_the_verified_account_wins_when_a_url_cannot_say():
+    """@shattawaleking is verified with 5.2M and @shattawalenews has 555.
+    Nothing in either URL says which is him; the accounts say it plainly."""
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("shattawaleking", 5_200_000, True),
+                                   ("shattawalenews", 555, False))) as actor:
+        seed = resolve_seed("Shatta Wale", settings=_settings())
+
+    assert seed is not None
+    assert seed.handle == "shattawaleking" and seed.platform == "tiktok"
+    assert actor.call_count == 1                      # ONE run for all rivals
+    assert sorted(actor.call_args.kwargs["creators"]) == [
+        "shattawaleking", "shattawalenews",
+    ]
+
+
+def test_an_ordinary_creator_is_not_refused_for_being_unverified():
+    """Most people are not verified. @uncle.gago is somebody the operator has
+    every right to research, and "verified or nothing" would lose exactly the
+    ordinary creators this tool is for. One candidate, nothing to choose
+    between — so it comes back, marked unconfirmed."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@unclegagoclips", "Uncle Gago"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("unclegagoclips", 4_200, False))):
+        seed = resolve_seed("Uncle Gago", settings=_settings())
+
+    assert seed is not None
+    assert seed.handle == "unclegagoclips"
+    assert seed.confirmed is False          # and the prose has to say so
+
+
+def test_a_choice_between_unverified_rivals_is_not_guessed():
+    """The @billburrbits shape. With several plausible accounts and nothing
+    verifying any of them, picking by follower count is a guess — and a clips
+    account can out-follow the person it is about."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@billburrbits", "Bill Burr (@billburrbits)"),
+        ("https://www.tiktok.com/@billburrclips", "Bill Burr clips"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("billburrbits", 900_000, False),
+                                   ("billburrclips", 120_000, False))):
+        assert resolve_seed("Bill Burr", settings=_settings()) is None
+
+
+def test_a_verified_account_still_beats_an_unverified_one():
+    """Order matters: verified wins outright, even when an unverified rival
+    has more followers."""
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_actor(("shattawalenews", 9_000_000, False),
+                                   ("shattawaleking", 5_200_000, True))):
+        seed = resolve_seed("Shatta Wale", settings=_settings())
+
+    assert seed.handle == "shattawaleking" and seed.confirmed is True
+
+
+def test_a_remark_never_starts_a_paid_actor_run():
+    """check_handle is a sentence to read. It fell through to resolve_seed,
+    which now weighs rivals by SCRAPING them — so one profile read fired two
+    actor runs and the budget counted one of them."""
+    from app.services.grounding import check_handle
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@unclegagoclips", "Uncle Gago clips"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        check_handle("unclegago", "tiktok", settings=_settings())
+
+    actor.assert_not_called()
+
+
+def test_a_name_that_already_resolves_free_never_reaches_the_paid_check():
+    """Sarkodie, Stonebwoy, Khaby Lame and Black Sherif resolve on the handle
+    alone. They must go on costing nothing."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@stonebwoy", "STONEBWOY"),
+        ("https://www.tiktok.com/@stonebwoyfans", "fans"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        seed = resolve_seed("Stonebwoy", settings=_settings())
+
+    assert seed.handle == "stonebwoy"
+    actor.assert_not_called()
+
+
+def test_only_handles_carrying_the_name_are_paid_to_look_at():
+    """A search returns strangers. Weighing every one of them pays to look at
+    accounts nobody suggested."""
+    from app.services.grounding import resolve_seed
+
+    provider = SimpleNamespace(name="tavily", search=lambda q: _hits(
+        ("https://www.tiktok.com/@ataafelicia", "someone"),
+        ("https://www.tiktok.com/@heishotshot4", "someone else"),
+    ))
+    with patch("app.services.grounding.provider_from_settings", return_value=provider), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
         assert resolve_seed("Kevin Hart", settings=_settings()) is None
+
+    actor.assert_not_called()
+
+
+def test_no_token_means_an_honest_miss_not_a_crash():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config", return_value={}):
+        assert resolve_seed("Shatta Wale", settings=_settings()) is None
+
+
+def test_weighing_can_be_turned_off():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        assert resolve_seed(
+            "Shatta Wale", settings=_settings(seed_verification_enabled=False)
+        ) is None
+    actor.assert_not_called()
+
+
+def test_a_failed_actor_run_leaves_the_name_unresolved():
+    from app.services.grounding import resolve_seed
+
+    with patch("app.services.grounding.provider_from_settings",
+               return_value=_rivals_provider()), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               side_effect=RuntimeError("apify down")):
+        assert resolve_seed("Shatta Wale", settings=_settings()) is None
 
 
 def test_posts_and_reels_are_not_accounts():
@@ -2751,3 +2931,1005 @@ def test_the_router_keeps_the_limit_in_the_topic():
     from app.services.grounding import TRIAGE_SYSTEM
 
     assert "CARRY THE OPERATOR'S LIMITS INTO THE TOPIC" in TRIAGE_SYSTEM
+
+
+def test_an_open_field_question_escalates_however_the_answer_is_worded():
+    """"instagram and niche is tech_boys" answers exactly what was asked, and
+    was searched instead — because the escalation required four words or
+    fewer and this is six. Counting words is the same mistake as matching
+    keywords, one level down.
+
+    The fact reported is only that a field question is outstanding. Whether
+    this message answers it is the router's call."""
+    import json as _json
+    from app.models.domain import ChatTurn
+    from app.services.grounding import _answers_a_pending_field
+
+    pending = [
+        ChatTurn(role="user", content="scrape isaac"),
+        ChatTurn(role="assistant", content=_json.dumps(
+            {"clarifying_question": "Which platform and niche?",
+             "missing_fields": ["platform", "niche"]})),
+    ]
+    for reply in ("instagram and niche is tech_boys",
+                  "the niche is cooking, use tiktok please",
+                  "tech_giants",
+                  "instagram"):
+        assert _answers_a_pending_field(reply, pending), reply
+
+    # Nothing outstanding, nothing to escalate.
+    answered = pending + [
+        ChatTurn(role="user", content="instagram"),
+        ChatTurn(role="assistant", content='{"summary":"a plan"}'),
+    ]
+    assert not _answers_a_pending_field("anything", answered)
+    assert not _answers_a_pending_field("anything", [])
+    assert not _answers_a_pending_field("", pending)
+
+
+# ── is this what was asked for ───────────────────────────────────────
+
+
+def _c(name, handle, why):
+    from app.models.domain import Creator
+    return Creator(name=name, handle=handle, platform="tiktok", why=why)
+
+
+def test_the_filter_keeps_everything_when_it_cannot_justify_dropping():
+    """A creator wrongly dropped is invisible — the operator cannot see what
+    is not there, while an irrelevant one they can see and ignore."""
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("A", "a", "1,000 followers"), _c("B", "b", "2,000 followers")]
+    with patch("app.services.grounding.OpenAI", return_value=_triage('{"drop": []}')):
+        assert filt(rows, "armenian comedians", openai_key="sk") == rows
+    # A model that wants everything gone is wrong, not decisive.
+    everything = '{"drop": [{"n": 1, "why": "x"}, {"n": 2, "why": "x"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(everything)):
+        assert filt(rows, "armenian comedians", openai_key="sk") == rows
+    # ...and a failure costs the filtering, never the turn.
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")):
+        assert filt(rows, "x", openai_key="sk") == rows
+
+
+def test_the_filter_drops_only_what_the_model_named():
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("Radio", "power106la", "LA morning crew"),
+            _c("Comic", "hay_humour", "armenian jokes"),
+            _c("News", "sarkupdatestv", "sarkodie news")]
+    payload = '{"drop": [{"n": 1, "why": "a radio station"}, {"n": 3, "why": "ghanaian news"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(payload)):
+        kept = filt(rows, "armenian comedians on tiktok", openai_key="sk")
+    assert [c.handle for c in kept] == ["hay_humour"]
+
+
+def test_an_out_of_range_index_cannot_drop_the_wrong_person():
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("A", "a", "x"), _c("B", "b", "y")]
+    payload = '{"drop": [{"n": 9, "why": "nonsense"}, {"n": "two", "why": "nonsense"}]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(payload)):
+        assert filt(rows, "x", openai_key="sk") == rows
+
+
+def test_a_scraped_creator_carries_what_it_posts():
+    """Without a caption a creator record says only how many followers it has,
+    which is nothing to judge relevance on: shown "925,600 followers", a
+    filter cannot tell a Los Angeles radio station from a comedian."""
+    from app.services.grounding import creators_from_post_authors
+    from app.services.research.engine import schema
+
+    item = schema.SourceItem(
+        item_id="i", source="tiktok", title="", body="Tune in weekdays 6am",
+        url="u", author="power106la", container="", published_at="",
+        date_confidence="", engagement={}, relevance_hint="", why_relevant="",
+        snippet="", metadata={"author_fans": 925600, "hashtags": ["radio"]},
+    )
+    cand = schema.Candidate(
+        candidate_id="c", item_id="i", source="tiktok", title="", url="u",
+        snippet="", subquery_labels=[], native_ranks={}, local_relevance=0.0,
+        freshness=0.0, engagement={}, source_quality=0.0, rrf_score=0.0,
+    )
+    cand.source_items = [item]
+
+    creator = creators_from_post_authors([cand])[0]
+    assert "925,600 followers" in creator.why
+    assert "Tune in weekdays 6am" in creator.why
+
+
+# --------------------------------------------------------------------------
+# check_handle — a handle the operator typed is exact, not necessarily right
+# --------------------------------------------------------------------------
+
+def _hit(url, title=""):
+    from types import SimpleNamespace
+    return SimpleNamespace(url=url, title=title, snippet="", content="")
+
+
+def test_a_handle_the_web_points_at_is_left_alone():
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings") as prov:
+        prov.return_value.search.return_value = [
+            _hit("https://www.tiktok.com/@sarkodie.official", "Sarkodie"),
+        ]
+        got = check_handle("sarkodie.official", "tiktok", settings=_settings())
+
+    assert got.backed is True
+    assert got.looks_wrong is False
+    assert prov.return_value.search.call_count == 1      # no second search
+
+
+def test_a_handle_nothing_points_at_offers_what_the_name_resolves_to():
+    from app.services.grounding import ResolvedSeed, check_handle
+
+    real = ResolvedSeed(name="sarkodie", handle="sarkodie.official",
+                        platform="tiktok", url="u")
+    with patch("app.services.grounding.provider_from_settings") as prov, \
+         patch("app.services.grounding.resolve_seed", return_value=real):
+        prov.return_value.search.return_value = [
+            _hit("https://www.tiktok.com/@someoneelse", "someone"),
+        ]
+        got = check_handle("sarkodie", "tiktok", settings=_settings())
+
+    assert got.backed is False
+    assert got.looks_wrong is True
+    assert got.alternative.handle == "sarkodie.official"
+
+
+def test_the_check_is_platform_specific():
+    """instagram.com/sarkodie being real says NOTHING about tiktok.com/@sarkodie,
+    which is the account that was wrong. A platform-blind check called the
+    TikTok handle fine and stayed silent."""
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings") as prov, \
+         patch("app.services.grounding.resolve_seed", return_value=None):
+        prov.return_value.search.return_value = [
+            _hit("https://www.instagram.com/sarkodie/", "Sarkodie"),
+        ]
+        got = check_handle("sarkodie", "tiktok", settings=_settings())
+
+    assert got.backed is False
+    assert "tiktok.com" in prov.return_value.search.call_args.args[0].text
+
+
+def test_a_handle_that_resolves_to_itself_is_no_news():
+    """Unbacked plus "did you mean @sarkodie?" is a sentence worth nobody's time."""
+    from app.services.grounding import ResolvedSeed, check_handle
+
+    itself = ResolvedSeed(name="sarkodie", handle="Sarkodie",
+                          platform="tiktok", url="u")
+    with patch("app.services.grounding.provider_from_settings") as prov, \
+         patch("app.services.grounding.resolve_seed", return_value=itself):
+        prov.return_value.search.return_value = []
+        got = check_handle("sarkodie", "tiktok", settings=_settings())
+
+    assert got.alternative is None
+    assert got.looks_wrong is False
+
+
+def test_a_check_that_cannot_search_says_nothing():
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings",
+               side_effect=RuntimeError("tavily down")):
+        assert check_handle("sarkodie", "tiktok", settings=_settings()) is None
+
+
+def test_a_check_needs_a_platform_it_can_actually_look_at():
+    from app.services.grounding import check_handle
+
+    with patch("app.services.grounding.provider_from_settings") as prov:
+        assert check_handle("sarkodie", "youtube", settings=_settings()) is None
+        assert check_handle("", "tiktok", settings=_settings()) is None
+    prov.assert_not_called()
+
+
+# --------------------------------------------------------------------------
+# The router's rewrite is evidence too — a word list must not overrule it
+# --------------------------------------------------------------------------
+
+def test_a_comparison_the_word_list_misses_is_still_a_comparison():
+    """"creators in the same lane as @iamhamamat" is not in any word list, so
+    the gate said no, `subjects` survived, and _only_the_subjects filtered the
+    answer down to @iamhamamat HIMSELF — asked for people in his lane, you got
+    him back.
+
+    The router had already understood it: handed that sentence it rewrote the
+    topic to "similar to @iamhamamat", which the word list reads perfectly
+    well. The understanding was there and a regex that never saw it won."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search",'
+              '"topic":"beauty creators similar to @iamhamamat on Instagram",'
+              '"answer":"creators","subjects":["iamhamamat"]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same content style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators in the same lane as @iamhamamat on instagram",
+            _ctx(), settings=_settings())
+
+    # It is a comparison, so it asks what "similar" means instead of scraping.
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+    assert web.comparison_bases
+
+
+def test_a_request_to_look_at_one_account_is_not_turned_into_a_comparison():
+    """The union can only turn a no into a yes, which is exactly why the
+    no side has to be checked. "scrape @iamhamamat's posts" is about him and
+    nobody else, and no rewrite may make it mean the opposite."""
+    routed = ('{"action":"search",'
+              '"topic":"@iamhamamat Instagram posts","answer":"creators",'
+              '"subjects":["iamhamamat"]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering") as bases:
+        web = gather_web_context(
+            "scrape @iamhamamat's instagram posts", _ctx(), settings=_settings())
+
+    # Never reaches the comparison branch at all.
+    bases.assert_not_called()
+    assert web.action != "ask" or web.missing != ["basis"]
+
+
+def test_the_platform_can_be_named_in_words_the_list_does_not_have():
+    """"on the gram" is Instagram to everyone except a word list. Asking which
+    platform when they just said it is what makes the thing feel deaf."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search",'
+              '"topic":"beauty creators similar to @iamhamamat on Instagram",'
+              '"answer":"creators","subjects":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same content style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators similar to @iamhamamat on the gram",
+            _ctx(), settings=_settings())
+
+    # The basis question, NOT "which platform is this?"
+    assert web.missing == ["basis"]
+
+
+def test_a_platform_nobody_named_is_still_asked_for():
+    """"short form video" is TikTok or Reels and the operator has to say
+    which. The union must not invent an answer to a real question."""
+    routed = ('{"action":"search",'
+              '"topic":"beauty creators similar to @iamhamamat on short form video",'
+              '"answer":"creators","subjects":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        web = gather_web_context(
+            "beauty creators similar to @iamhamamat on short form video",
+            _ctx(), settings=_settings())
+
+    assert web.action == "ask"
+    assert web.missing == ["platform"]
+
+
+# --------------------------------------------------------------------------
+# The model says what the operator meant; code acts on it
+# --------------------------------------------------------------------------
+
+def test_the_router_says_which_accounts_are_the_yardstick():
+    """No word list can hold every way of saying "find others like this one".
+    "who scratch the same itch as @x", "@x's understudies", "the Kenyan answer
+    to @x", "i'm bored of @x, who else is out there" — every one of those
+    returned @x HIMSELF, because the phrase was not in the list so the handle
+    was read as the target.
+
+    The model decides now and says so in the response. There is no vocabulary
+    left to miss."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search","topic":"beauty creators on Instagram",'
+              '"answer":"creators","subjects":[],'
+              '"reference_accounts":["iamhamamat"],"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same content style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators who scratch the same itch as @iamhamamat on the gram",
+            _ctx(), settings=_settings())
+
+    # A comparison: it asks what "similar" means rather than scraping him.
+    assert web.action == "ask"
+    assert web.missing == ["basis"]
+
+
+def test_no_references_means_no_comparison_however_it_is_phrased():
+    """The converse has to hold or the fix just makes the opposite mistake.
+    "scrape @x's posts" is about @x and nobody else."""
+    routed = ('{"action":"search","topic":"@iamhamamat Instagram posts",'
+              '"answer":"creators","subjects":["iamhamamat"],'
+              '"reference_accounts":[],"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering") as bases:
+        gather_web_context("scrape @iamhamamat's instagram posts",
+                           _ctx(), settings=_settings())
+
+    bases.assert_not_called()
+
+
+def test_the_router_names_the_platform_in_whatever_words_it_was_given():
+    """"on the gram" is Instagram to everyone except a word list."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search","topic":"beauty creators","answer":"creators",'
+              '"subjects":[],"reference_accounts":["iamhamamat"],'
+              '"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators occupying @iamhamamat's space on the gram",
+            _ctx(), settings=_settings())
+
+    assert web.missing == ["basis"]        # not ["platform"]
+
+
+def test_a_platform_the_operator_did_not_name_is_still_asked_for():
+    """"on short form video" is TikTok or Reels. The model returns null and
+    the question gets asked, which is right — only they know."""
+    routed = ('{"action":"search","topic":"beauty creators","answer":"creators",'
+              '"subjects":[],"reference_accounts":["iamhamamat"],'
+              '"platform":null}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        web = gather_web_context(
+            "beauty creators like @iamhamamat on short form video",
+            _ctx(), settings=_settings())
+
+    assert web.action == "ask"
+    assert web.missing == ["platform"]
+
+
+def test_a_router_that_says_nothing_falls_back_to_the_word_lists():
+    """An EARLIER message was routed on its own turn and its judgement is not
+    in this response. The lists stay for those; they just stop deciding what
+    the model has already decided."""
+    routed = ('{"action":"search","topic":"beauty creators","answer":"creators",'
+              '"subjects":[]}')          # no reference_accounts at all
+    from app.models.domain import ComparisonBasis
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="same style"),
+                             ComparisonBasis(label="same niche")]):
+        web = gather_web_context(
+            "beauty creators similar to @iamhamamat on instagram",
+            _ctx(), settings=_settings())
+
+    assert web.missing == ["basis"]       # the old path still works
+
+
+# --------------------------------------------------------------------------
+# The size the operator asked for, read by the model
+# --------------------------------------------------------------------------
+
+def test_the_router_reads_the_size_out_of_the_words_used():
+    """The regex knew "exclude|under|over|at least" plus a word-number table.
+    "micro influencers only", "i don't want the huge accounts" and "nothing
+    too big" set NO limit at all, and the answer came back led by accounts at
+    five million. It also could not hold two bounds: "between 10k and 500k"
+    returned one of them."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"beauty creators in Ghana",'
+              '"answer":"creators","subjects":[],"reference_accounts":[],'
+              '"platform":null,"min_followers":10000,"max_followers":500000}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators between 10k and 500k", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["min_followers"] == 10000
+    assert got["max_followers"] == 500000
+
+
+def test_a_size_nobody_asked_for_is_never_invented():
+    """A limit nobody requested silently deletes most of the answer, and they
+    cannot see what is not there."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"beauty creators in Ghana",'
+              '"answer":"creators","subjects":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators in Ghana", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["min_followers"] is None
+    assert got["max_followers"] is None
+
+
+def test_a_size_that_is_not_a_number_is_no_size():
+    """A model asked for a number sometimes sends "a million" or "null"."""
+    from app.services.grounding import _route_once
+
+    for bad in ('"a million"', '"null"', "true", "-5", "0"):
+        routed = ('{"action":"search","topic":"t","answer":"creators",'
+                  '"subjects":[],"max_followers":%s}' % bad)
+        with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+            got = _route_once("t", _ctx(), None, openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+        assert got["max_followers"] is None, bad
+
+
+def test_the_old_parser_still_covers_a_turn_the_router_did_not_speak_for():
+    """The regex is the fallback now, not the decision."""
+    from app.services.grounding import follower_limit
+
+    assert follower_limit("exclude anyone over one million followers") == (None, 1_000_000)
+    assert follower_limit("at least 50k followers") == (50_000, None)
+
+
+# --------------------------------------------------------------------------
+# Look, then hunt — the seed is the only account we know is right
+# --------------------------------------------------------------------------
+
+def _posts(*rows):
+    """rows: (author, [tags])"""
+    return {"items": [
+        {"text": "p", "author_name": a, "hashtags": t} for a, t in rows
+    ]}
+
+
+def _keep_all_tags():
+    """Pass the tag judgement through — these tests are about which POSTS
+    count and how tags are cleaned, not about which are worth sweeping."""
+    return patch("app.services.grounding._tags_worth_sweeping",
+                 side_effect=lambda tags, handles, topic, **kw: tags)
+
+
+def test_the_hunt_uses_the_tags_the_seed_actually_posts():
+    """The search for "creators similar to @iamhamamat" was built out of the
+    words in that sentence — #naturalbeauty, #melaninpoppin, adjectives she
+    has never posted — and came back with an Italian spa, a Bengali account,
+    a photographer and three shops. Her real tags are #ThingsToDoInAccra,
+    #ProtectShea, #HamamatVillage."""
+    from app.services.grounding import seed_signals
+
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(
+                   ("iamhamamat", ["ProtectShea", "Accra", "ProtectShea"]),
+                   ("iamhamamat", ["ProtectShea", "Accra"]),
+               )) as actor:
+        tags, note, _ = seed_signals(["@iamhamamat"], "instagram", settings=_settings())
+
+    assert tags[0] == "protectshea"      # most used first
+    assert "accra" in tags
+    assert note is None
+    assert actor.call_args.kwargs["ig_creators"] == ["iamhamamat"]
+    assert not actor.call_args.args[0]   # no keyword sweep, profile only
+
+
+def test_a_stranger_in_the_results_does_not_get_a_vote():
+    """The lanes return whoever the actor felt like adding. A tag off someone
+    else's post is the adjective problem again with a scrape attached."""
+    from app.services.grounding import seed_signals
+
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(
+                   ("iamhamamat", ["ProtectShea"]),
+                   ("someshop", ["lashes", "lipkits", "sale"]),
+               )):
+        tags, _, _ = seed_signals(["iamhamamat"], "instagram", settings=_settings())
+
+    assert tags == ["protectshea"]
+
+
+def test_a_seed_that_cannot_be_read_says_so():
+    """Silence here reads exactly like a hunt built on the right person, and
+    the operator cannot tell them apart from a list of names."""
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(("someoneelse", ["x"]))):
+        tags, note, _ = seed_signals(["iamhamamat"], "instagram", settings=_settings())
+
+    assert tags == []
+    assert note and "@iamhamamat" in note and "rather than on what" in note
+
+
+def test_punctuation_never_becomes_a_hashtag():
+    """"KingsandQueens:" came back with the colon attached, and a tag with
+    punctuation in it matches nothing at all."""
+    from app.services.grounding import seed_signals
+
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value=_posts(("a", ["KingsandQueens:", "#Accra", "ok"]))):
+        tags, _, _ = seed_signals(["a"], "instagram", settings=_settings())
+
+    assert "kingsandqueens" in tags and "accra" in tags
+    assert all(t.isalnum() or "_" in t for t in tags)
+
+
+def test_reading_the_seeds_is_one_run_for_all_of_them():
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_tiktok_apify",
+               return_value=_posts(("a", ["x"]), ("b", ["y"]))) as actor:
+        seed_signals(["a", "b"], "tiktok", settings=_settings())
+
+    assert actor.call_count == 1
+    assert actor.call_args.kwargs["creators"] == ["a", "b"]
+
+
+def test_no_token_or_no_platform_means_no_paid_call():
+    from app.services.grounding import seed_signals
+
+    with patch("app.services.research.engine.apify_social.search_tiktok_apify") as actor:
+        with patch("app.services.grounding._engine_config", return_value={}):
+            assert seed_signals(["a"], "tiktok", settings=_settings()) == ([], None, "")
+        assert seed_signals(["a"], "youtube", settings=_settings()) == ([], None, "")
+        assert seed_signals([], "tiktok", settings=_settings()) == ([], None, "")
+    actor.assert_not_called()
+
+
+def test_the_router_names_the_account_they_do_not_want():
+    """"like @a but not like @b" — @b's hashtags drove the entire search on a
+    turn that said not to. Wrong twice: filler, and from the wrong person."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"t","answer":"creators","subjects":[],'
+              '"reference_accounts":["a","b"],"exclude_accounts":["b"],'
+              '"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators like @a but not like @b", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["reference_accounts"] == ["a", "b"]
+    assert got["exclude_accounts"] == ["b"]
+
+
+def test_which_tags_are_worth_sweeping_is_read_against_the_request():
+    """This was a word list, and mine had "model", "style" and "woman" in it
+    — exactly the tags a fashion seed lives on. It is not a thing a list can
+    know: #fashion is reach under "find me fashion creators" and a real
+    signal under "find me creators like this potter"."""
+    from app.services.grounding import _tags_worth_sweeping
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"sweep": ["thingstodoinaccra", "accra"]}')) as llm:
+        kept = _tags_worth_sweeping(
+            ["explore", "beauty", "thingstodoinaccra", "accra"],
+            ["iamhamamat"], "beauty creators on Instagram", settings=_settings(),
+        )
+
+    assert kept == ["thingstodoinaccra", "accra"]
+    sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][1]
+    assert "beauty creators on Instagram" in sent["content"]   # the request
+    assert "@iamhamamat" in sent["content"]                    # whose tags
+
+
+def test_a_tag_the_seed_never_posted_cannot_be_swept():
+    """The model returns tags; only the ones it was shown are real."""
+    from app.services.grounding import _tags_worth_sweeping
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"sweep": ["accra", "invented"]}')):
+        kept = _tags_worth_sweeping(["accra"], ["a"], "t", settings=_settings())
+
+    assert kept == ["accra"]
+
+
+def test_no_judgement_falls_back_to_the_planner_rather_than_sweeping_anyway():
+    """Failure has to land on the behaviour from before any of this existed,
+    not on a sweep of whatever the account happened to tag."""
+    from app.services.grounding import _tags_worth_sweeping
+
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("down")):
+        assert _tags_worth_sweeping(["explore", "beauty"], ["a"], "t",
+                                    settings=_settings()) == []
+
+
+def test_the_filter_is_told_what_the_seed_is_actually_like():
+    """"creators similar to @iamhamamat" with no idea who she is leaves only
+    the word "beauty" to judge on — and under that a photograph of FLOWERS
+    tagged #naturalbeauty is a beauty account, as is a landscape at dusk and
+    a jar of skin-lightening cream. All three came back."""
+    from app.services.grounding import seed_signals
+
+    with _keep_all_tags(), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               return_value={"items": [
+                   {"text": "Shea butter made by the women of my village",
+                    "author_name": "iamhamamat", "hashtags": ["ProtectShea"]},
+               ]}):
+        tags, note, profile = seed_signals(
+            ["iamhamamat"], "instagram", settings=_settings(), topic="beauty creators")
+
+    assert "@iamhamamat" in profile
+    assert "#protectshea" in profile.lower()
+    assert "Shea butter made by the women" in profile
+
+
+def test_the_seed_profile_reaches_the_filter():
+    from app.services.grounding import drop_irrelevant_creators
+    from app.models.domain import Creator
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"drop": []}')) as llm:
+        drop_irrelevant_creators(
+            [Creator(name="a", handle="a", why="x"),
+             Creator(name="b", handle="b", why="y")],
+            "beauty creators similar to @iamhamamat",
+            openai_key="sk-test", seed_profile="@iamhamamat post under: #protectshea",
+        )
+
+    sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][1]
+    assert "#protectshea" in sent["content"]
+    assert "What the account they named is actually like" in sent["content"]
+
+
+def test_the_relevance_filter_uses_the_bigger_model():
+    """The last judgement before the operator sees the list, and a fine one:
+    a photographer who shoots beautiful women, a brand that sells shea butter
+    and a creator who talks about shea butter all read alike in one line of
+    caption. On the same 36 accounts gpt-4o-mini left ten that did not
+    belong; gpt-4o left five."""
+    from app.models.domain import ComparisonBasis
+
+    routed = ('{"action":"search","topic":"beauty creators in Ghana",'
+              '"answer":"creators","subjects":[],"reference_accounts":[],'
+              '"platform":"instagram"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding.drop_irrelevant_creators") as filt, \
+         patch("app.services.grounding._research_via_engine", return_value=None), \
+         patch("app.services.grounding.provider_from_settings",
+               return_value=_provider([])):
+        gather_web_context("beauty creators in Ghana on instagram", _ctx(),
+                           settings=_settings(grounding_escalation_model="gpt-4o"))
+
+    if filt.called:
+        assert filt.call_args.kwargs["model"] == "gpt-4o"
+
+
+# --------------------------------------------------------------------------
+# How far back, and in what order
+# --------------------------------------------------------------------------
+
+def test_the_days_they_asked_for_reach_the_scrape_lanes():
+    """"in the last 30 days" was read by the router and then thrown away: the
+    engine was handed the CONFIG default, so the lanes searched a full year
+    whatever the question said, and nothing in the reply mentioned it.
+
+    "window" could not have carried it either — it is a d|w|m|y bucket and
+    there is no bucket for thirty days."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"t","answer":"creators","subjects":[],'
+              '"window":"m","window_days":30,"rank_by":"engagement_rate"}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("UK TikTok creators in the last 30 days", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["window_days"] == 30
+    assert got["rank_by"] == "engagement_rate"
+
+
+def test_an_order_nobody_asked_for_is_not_invented():
+    from app.services.grounding import _route_once
+
+    routed = '{"action":"search","topic":"t","answer":"creators","subjects":[]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("beauty creators in Ghana", _ctx(), None,
+                          openai_key="sk-test", model="gpt-4o-mini", timeout=15.0)
+
+    assert got["window_days"] is None
+    assert got["rank_by"] is None
+
+
+def _candidate(handle, fans, likes, source="tiktok", views=0):
+    from types import SimpleNamespace
+    item = SimpleNamespace(
+        source=source, author=handle, url=f"https://x/{handle}", title="", body="",
+        snippet="", engagement={"likes": likes, "views": views},
+        metadata={"author_fans": fans, "author_verified": False,
+                  "author_nickname": handle, "hashtags": []},
+    )
+    return SimpleNamespace(source=source, source_items=[item])
+
+
+def test_an_account_with_no_rate_does_not_outrank_every_rate():
+    """rank was the follower count when a rate could not be computed —
+    hundreds to millions, against a rate of 0 to 20. So every account without
+    a rate sorted above every account with one, and the list came back led by
+    an account with 119 followers and no engagement figure at all."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("no_engagement", 119, 0),        # nothing to divide
+        _candidate("has_a_rate", 20_000, 4_000),    # 20%
+    ], "engagement_rate")
+
+    assert [c.handle for c in got][0] == "has_a_rate"
+
+
+def test_engagement_is_measured_against_who_saw_it():
+    """Over VIEWS, not followers. TikTok shows a video to people who do not
+    follow the account, so interactions can dwarf the following: 740 of them
+    on THIRTY-EIGHT followers read as 1947% and topped "the highest
+    engagement rate in the UK". Views are who actually saw it, so the ratio
+    answers the question asked — of the people this reached, how many did
+    something — and it does not explode on a small account."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("tiny", 38, 740, views=20_000),        # 3.7% of who saw it
+        _candidate("real", 20_000, 4_000, views=40_000),  # 10%
+    ], "engagement_rate")
+
+    assert [c.handle for c in got] == ["real", "tiny"]
+    assert "10.0% engagement" in got[0].why
+    assert "1947" not in " ".join(c.why for c in got)
+
+
+def test_a_rate_is_summed_across_everything_they_posted():
+    """A creator with several posts in the results was ranked on whichever
+    single one sorted first, so one lucky video spoke for them. Totals in,
+    totals out."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("steady", 5_000, 500, views=10_000),    # 5%
+        _candidate("steady", 5_000, 500, views=10_000),    # 5%
+        _candidate("spiky", 5_000, 1_800, views=2_000),    # 90% on one video
+        _candidate("spiky", 5_000, 200, views=98_000),     # ...and 0.2% on another
+    ], "engagement_rate")
+
+    order = [c.handle for c in got]
+    assert order[0] == "steady"      # 1000/20000 = 5%  beats  2000/100000 = 2%
+
+
+def test_a_rate_over_a_handful_of_views_is_not_a_rate():
+    """Five likes on a video twenty people saw is 25% and means nothing."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("barelyseen", 900, 5, views=20),
+        _candidate("seen", 900, 900, views=30_000),
+    ], "engagement_rate")
+
+    assert [c.handle for c in got][0] == "seen"
+    assert "25.0% engagement" not in " ".join(c.why for c in got)
+
+
+def test_instagram_can_be_ranked_by_engagement_now():
+    """It could not be, when the denominator was followers — the Instagram
+    actor returns none. A view count it does return."""
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors(
+        [_candidate("ig", None, 900, source="instagram", views=10_000)],
+        "engagement_rate")
+
+    assert "9.0% engagement" in got[0].why
+
+
+def test_the_tags_the_operator_typed_are_all_used():
+    """Eight were listed and three were swept. The planner re-derives its own
+    tags from the topic, which is the same mistake as re-deriving a handle
+    somebody had already given exactly."""
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"skincare creators in the UK",'
+              '"answer":"creators","subjects":[],"platform":"instagram",'
+              '"hashtags":["skincare","cleanbeauty","glowingskin","beautytips",'
+              '"skincareroutine","selfcare","naturalskincare","skinhealth"]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("...", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert len(got["hashtags"]) == 8
+    assert got["hashtags"][0] == "skincare"
+    assert "skinhealth" in got["hashtags"]
+
+
+def test_a_tag_is_cleaned_but_never_invented():
+    from app.services.grounding import _route_once
+
+    routed = ('{"action":"search","topic":"t","answer":"creators","subjects":[],'
+              '"hashtags":["#Clean Beauty!","glowingskin","glowingskin","x",""]}')
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("t", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert got["hashtags"] == ["CleanBeauty", "glowingskin"]   # deduped, stripped, no "x"
+
+
+def test_no_tags_typed_means_the_planner_decides_alone():
+    from app.services.grounding import _route_once
+
+    routed = '{"action":"search","topic":"t","answer":"creators","subjects":[]}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)):
+        got = _route_once("t", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert got["hashtags"] == []
+
+
+# --------------------------------------------------------------------------
+# Our bugs must not look like Apify having a quiet afternoon
+# --------------------------------------------------------------------------
+
+def test_a_programming_error_is_logged_as_a_bug_with_a_traceback(caplog):
+    """A variable referenced in a function it does not live in came out as
+    "research engine failed: name 'routed' is not defined" at WARNING, and
+    the turn answered quietly without the lanes. It reads exactly like
+    Apify being down."""
+    import logging
+    from app.services.grounding import seed_signals
+
+    with caplog.at_level(logging.WARNING, logger="app.services.grounding"), \
+         patch("app.services.grounding._engine_config",
+               return_value={"APIFY_API_TOKEN": "apify-test"}), \
+         patch("app.services.research.engine.apify_social.search_instagram_apify",
+               side_effect=NameError("name 'routed' is not defined")):
+        tags, note, profile = seed_signals(["a"], "instagram", settings=_settings())
+
+    assert (tags, profile) == ([], "")            # still swallowed
+    bug = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert bug, "a NameError was logged at WARNING, like an upstream failure"
+    assert "BUG" in bug[0].getMessage()
+    assert bug[0].exc_info, "no traceback, so there is nothing to fix it from"
+
+
+def test_an_upstream_failure_stays_a_warning(caplog):
+    """The resilience is the point. Apify down, Tavily timing out, a model
+    returning a shape we did not expect — all still one quiet line."""
+    import logging
+    from app.services.grounding import seed_signals
+
+    for boom in (TimeoutError("read timed out"),
+                 ConnectionError("apify unreachable"),
+                 TypeError("'NoneType' object is not subscriptable"),
+                 KeyError("items")):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="app.services.grounding"), \
+             patch("app.services.grounding._engine_config",
+                   return_value={"APIFY_API_TOKEN": "apify-test"}), \
+             patch("app.services.research.engine.apify_social.search_instagram_apify",
+                   side_effect=boom):
+            seed_signals(["a"], "instagram", settings=_settings())
+
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], boom
+        assert [r for r in caplog.records if r.levelno == logging.WARNING], boom
+
+
+def test_every_swallowing_fallback_tells_them_apart():
+    """Sixteen places catch Exception and return something safe. A bug in any
+    one of them is invisible, so none of them may log a bare warning."""
+    import re
+    from pathlib import Path
+
+    src = Path("app/services/grounding.py").read_text()
+    bare = re.findall(r'logger\.warning\("web grounding: [^"]*"[^)]*, exc\)', src)
+    assert not bare, f"these swallow a bug as a warning: {bare}"
+
+
+def test_the_router_platform_opens_the_lane_as_well_as_silencing_the_question():
+    """"on the gram" was read by the router, which stopped the "which
+    platform?" question being asked — and then the paid lane was still gated
+    on a word list that had never heard of it. The question skipped AND the
+    lane shut: the worst of both."""
+    from app.services.grounding import _lanes_from
+
+    assert _lanes_from("instagram") == ["instagram"]
+    assert _lanes_from("tiktok") == ["tiktok"]
+    assert _lanes_from("both") == ["instagram", "tiktok"]
+    assert _lanes_from(None) == []
+    assert _lanes_from("youtube") == []          # nothing we can scrape
+
+
+def test_the_words_still_win_when_they_are_there():
+    """The router's reading is the FALLBACK, not the override. If they typed
+    "tiktok" the lane is TikTok, whatever a model decided."""
+    from app.services.grounding import platforms_named
+
+    assert platforms_named("dance creators on tiktok") == ["tiktok"]
+
+
+# --------------------------------------------------------------------------
+# Greetings — Use Case 17, Conversation Navigation
+# --------------------------------------------------------------------------
+
+def test_a_greeting_is_answered_not_refused():
+    """"Hello" was a "skip", which falls through to the planner and comes
+    back "This question is outside what I can help with" — the same sentence
+    as a question about the weather. Somebody saying hello has not asked for
+    anything that is outside anything."""
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"action":"respond","reason":"greeting",'
+                                    '"greeting":true}')):
+        from app.services.grounding import _route_once
+        got = _route_once("Hello", _ctx(), None, openai_key="sk-test",
+                          model="gpt-4o-mini", timeout=15.0)
+
+    assert got["action"] == "respond"
+    assert got["greeting"] is True
+
+
+def test_a_greeting_is_answered_with_no_conversation_behind_it():
+    """respond_from_thread refuses an empty thread, because "among these,
+    which are from Armenia?" with nothing on screen is not answerable. A
+    greeting asks nothing of the conversation, so an empty one is no reason
+    to refuse it — and the refusal was the rejection message."""
+    from app.services.grounding import respond_from_thread
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"reply":"Hi! How can I help with creator '
+                                    'research today?","next":"What are you after?"}')):
+        reply, nxt = respond_from_thread("Hello", None, openai_key="sk-test",
+                                         greeting=True)
+
+    assert reply.startswith("Hi!")
+
+
+def test_only_a_greeting_gets_that_exemption():
+    """The guard is load-bearing for everything else."""
+    from app.services.grounding import respond_from_thread
+
+    with patch("app.services.grounding.OpenAI") as llm:
+        assert respond_from_thread(
+            "among these, which are from Armenia?", None, openai_key="sk-test",
+        ) == (None, None)
+    llm.assert_not_called()
+
+
+def test_the_empty_thread_is_stated_so_it_cannot_be_imagined():
+    """Cold "Hi" came back "We're looking into creators with over 10k
+    followers. I have a list of handles and follower counts so far." There
+    was no conversation. It invented one."""
+    from app.services.grounding import respond_from_thread
+
+    with patch("app.services.grounding.OpenAI",
+               return_value=_triage('{"reply":"Hi! How can I help?","next":""}')) as llm:
+        respond_from_thread("Hi", None, openai_key="sk-test", greeting=True)
+
+    sent = llm.return_value.chat.completions.create.call_args.kwargs["messages"][-1]
+    assert "THERE IS NO CONVERSATION ABOVE THIS" in sent["content"]
+    assert "none to invent" in sent["content"]
+
+
+def test_a_greeting_may_be_short():
+    """"Thanks — I'll be here." is twenty-three characters. The guard that
+    throws away a reply under thirty is right for a research answer and
+    wrong for a goodbye — it threw that one away, and the turn fell through
+    to telling somebody saying goodbye that their question was outside what
+    it can help with."""
+    from app.services.grounding import respond_from_thread
+
+    short = '{"reply":"Thanks — I\'ll be here.","next":""}'
+    with patch("app.services.grounding.OpenAI", return_value=_triage(short)):
+        reply, _ = respond_from_thread("Bye", None, openai_key="sk-test", greeting=True)
+    assert reply == "Thanks — I'll be here."
+
+    # ...and still thrown away when it is not a greeting.
+    from app.models.domain import ChatTurn
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage(short)):
+        assert respond_from_thread(
+            "which of these are in the UK?",
+            [ChatTurn(role="user", content="beauty creators"),
+             ChatTurn(role="assistant", content="20 creators")],
+            openai_key="sk-test",
+        ) == (None, None)

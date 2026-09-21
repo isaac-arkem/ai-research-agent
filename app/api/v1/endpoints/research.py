@@ -147,7 +147,7 @@ def _run_model(
     settings: Settings,
     history,
 ) -> tuple[str, AgentResult]:
-    model = req.model or settings.research_agent_model
+    model = settings.research_agent_model
     result = generate_research_plan(
         req.prompt,
         ctx,
@@ -189,8 +189,11 @@ def _error_payload(result: AgentResult, cid: str) -> dict:
     details = None
     if result.validation and result.validation.errors:
         details = [e.model_dump() for e in result.validation.errors]
+    message = result.error or "Request failed"
+    if result.error_code in {"openai_failed", "json_extract_failed", "planner_failed"}:
+        message = "Upstream failed"
     return error_body(
-        result.error or "Request failed",
+        message,
         result.error_code or "upstream_error",
         details=details,
         conversation_id=cid,
@@ -299,7 +302,7 @@ async def ask_stream(
 
     def run() -> None:
         try:
-            model = req.model or settings.research_agent_model
+            model = settings.research_agent_model
             result = generate_research_plan(
                 req.prompt,
                 ctx,
@@ -327,7 +330,7 @@ async def ask_stream(
         except Exception as exc:  # noqa: BLE001 - the stream must always close
             logger.exception("streamed ask failed")
             events.put(("failed", error_body(
-                str(exc) or "Request failed", "planner_failed", conversation_id=cid,
+                "Upstream failed", "planner_failed", conversation_id=cid,
             )))
         finally:
             events.put((_DONE, None))

@@ -23,10 +23,11 @@ from __future__ import annotations
 import logging
 from typing import List, Optional, Tuple
 
+from app.services.validator import VALID_MAX_CREATORS
+
 logger = logging.getLogger(__name__)
 
-# Mirrors validator.VALID_MAX_CREATORS, which is the authority.
-MAX_CREATORS_CHOICES = (5, 10, 20, 50, 100, 200)
+MAX_CREATORS_CHOICES = tuple(sorted(VALID_MAX_CREATORS))
 POSTS_MIN, POSTS_MAX = 1, 100
 
 

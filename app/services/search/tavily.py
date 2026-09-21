@@ -41,9 +41,9 @@ _VALID_WINDOWS = {"d", "w", "m", "y"}
 # 0-20 per the API.
 MAX_RESULTS = 20
 
-# Statuses that mean "stop asking for a while". Worded so looks_like_a_block()
-# in policy.py matches them and opens the circuit — otherwise a quota problem
-# burns the rest of the month on calls that are already being refused.
+# Statuses that mean the key is exhausted or we are being throttled.
+# Raised as SearchError so this lane stops instead of retrying a
+# refusal for the rest of the month.
 # 432/433 are Tavily's plan/usage limits.
 _QUOTA_STATUSES = {429, 432, 433}
 

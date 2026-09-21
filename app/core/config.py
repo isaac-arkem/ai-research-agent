@@ -126,10 +126,18 @@ class Settings(BaseSettings):
     # Breadth is the thing that was wrong, so it is worth paying for.
     research_depth: str = "default"
 
+    # ── Tools ───────────────────────────────────────────────────────────
+
     # Apify — used only to refresh the geo-targetable country list at startup.
-    # Without it the captured list in app/data/apify_countries.py is used.
+    # Without it, countries come from the Supabase table
+    # `apify_supported_countries` (see sql/002_apify_supported_countries.sql).
     apify_token: Optional[str] = None
     apify_tiktok_actor: str = "clockworks~tiktok-scraper"
+    # One Apify run to tell a real account from a fan account when the web
+    # search returns rivals it cannot separate. Only ever reached when the
+    # free name-to-handle match found nothing, so the names that already
+    # resolve cost nothing. Set false to go back to an honest miss instead.
+    seed_verification_enabled: bool = True
 
     # Optional — sensible defaults
     research_agent_model: str = "gpt-4o"
@@ -138,6 +146,7 @@ class Settings(BaseSettings):
 
     # Server settings
     app_name: str = "Research Agent"
+    # When true, /docs /redoc and /openapi.json are mounted. Off in production.
     debug: bool = False
 
     # Auth: mirrors arkgpt requireSocialListeningUser (Bearer JWT).

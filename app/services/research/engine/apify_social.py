@@ -33,11 +33,33 @@ def _log(msg: str):
     log.source_log("Apify", msg)
 
 
+# Only the fields the mappers below actually read. run-sync-get-dataset-items
+# streams the whole dataset in the same response that runs the actor, and
+# retrying is not an option — a retried run is a second actor run and bills
+# again — so a response that dies mid-download is data paid for and lost.
+#
+# It does die. Reading two Instagram profiles returned 473,832 bytes and then
+# "IncompleteRead", which the lane reported honestly as "could not read
+# @_zinatubako", and the hunt fell back to adjectives. Measured: 272,894 bytes
+# of which 28 fields per item were being carried to read 10, and asking for
+# the ten brings the same posts back in 8,867. Ninety-seven per cent less to
+# lose hold of.
+_TIKTOK_FIELDS = (
+    "id,text,authorMeta,webVideoUrl,createTimeISO,createTime,hashtags,"
+    "videoMeta,playCount,diggCount,commentCount,shareCount"
+)
+_INSTAGRAM_FIELDS = (
+    "id,shortCode,caption,url,ownerUsername,timestamp,hashtags,"
+    "videoPlayCount,videoViewCount,likesCount,commentsCount,videoDuration"
+)
+
+
 def _run_actor(
     actor: str,
     input_data: Dict[str, Any],
     token: str,
     timeout: int = 240,
+    fields: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Run an Apify actor synchronously and return its dataset items.
 
@@ -45,6 +67,8 @@ def _run_actor(
     actor run and bills a second time.
     """
     url = f"{APIFY_BASE}/acts/{actor}/run-sync-get-dataset-items?format=json&clean=true"
+    if fields:
+        url += f"&fields={fields}"
     data = http.post(
         url,
         json_data=input_data,
@@ -180,7 +204,12 @@ def search_tiktok_apify(
 
     input_data: Dict[str, Any] = {"resultsPerPage": limit}
     # Plain keyword variants only: clockworks does not support OR syntax.
-    queries = [q for q in expand_tiktok_queries(topic, depth) if " OR " not in q]
+    # An empty topic expands to [""], and a blank searchQueries entry makes the
+    # actor sweep at random. A profile-only read asks with no topic.
+    queries = [
+        q for q in expand_tiktok_queries(topic, depth)
+        if q and q.strip() and " OR " not in q
+    ]
     if queries:
         input_data["searchQueries"] = queries
         input_data["searchSection"] = "/video"
@@ -193,7 +222,8 @@ def search_tiktok_apify(
          f"profiles={creators or '-'} limit={limit}")
 
     try:
-        raw_items = _run_actor(TIKTOK_ACTOR, input_data, token)
+        raw_items = _run_actor(TIKTOK_ACTOR, input_data, token,
+                               fields=_TIKTOK_FIELDS)
     except Exception as e:
         _log(f"TikTok actor error: {e}")
         return {"items": [], "error": f"{type(e).__name__}: {e}"}
@@ -298,6 +328,7 @@ def search_instagram_apify(
                 IG_HASHTAG_ACTOR,
                 {"hashtags": tags, "resultsType": "posts", "resultsLimit": limit},
                 token,
+                fields=_INSTAGRAM_FIELDS,
             )
         except Exception as e:
             _log(f"Instagram hashtag actor error: {e}")
@@ -317,6 +348,7 @@ def search_instagram_apify(
                 IG_POSTS_ACTOR,
                 {"username": list(ig_creators), "resultsLimit": min(limit, 12)},
                 token,
+                fields=_INSTAGRAM_FIELDS,
             )
         except Exception as e:
             _log(f"Instagram posts actor error: {e}")
