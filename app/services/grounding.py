@@ -120,6 +120,9 @@ MAX_SNIPPET_CHARS = 300
 # Tavily's own ceiling. Credits are per search, not per result, so there is
 # nothing to save by asking for fewer.
 MAX_FINDINGS = 20
+# How many named people one follow-up will look up. The Russia list was 9;
+# this is a spend cap, not a quality one.
+MAX_SUBJECT_LOOKUPS = 20
 
 WINDOWS = {"d", "w", "m", "y"}
 
@@ -336,7 +339,14 @@ Only valid when findings already appear in the history. With nothing shown yet, 
 
 All four are "skip". So is a plain parameter tweak ("make it 50 posts") and a request that NAMES specific accounts to scrape.
 
-AN ACCOUNT IS AN @HANDLE OR A PROFILE URL. Nothing else. A message carrying no "@" and no link names NO account, however many people it mentions — so it is a "search", not a "skip". Check for the "@" before you answer "skip" on these grounds.
+A RESEARCH PLAN ALREADY IN THIS THREAD IS ALSO "skip". Changing a field of it — the niche, the post count, the platform, the handles — is an edit for the planner. Searching throws the plan away and starts a different job.
+
+  on screen: scrape @isaac on TikTok, niche general_content
+  now: "change the niche to music_man" -> skip
+  now: "make it 50 posts"              -> skip
+  now: "find cooking creators in Ghana" -> search  (a new question)
+
+AN ACCOUNT IS AN @HANDLE OR A PROFILE URL. Nothing else. A message carrying no "@" and no link names NO account, however many people it mentions — so it is a "search", not a "skip". Check for the "@" before you answer "skip" on these grounds. That test does not apply when a plan is already on screen: "change the niche to music_man" names no account and is still "skip".
 
   "@isaac and @dave"                      -> skip   (accounts, named)
   "scrape @cookingwithnada"               -> skip   (account, named)
@@ -459,6 +469,179 @@ def _recent_turns(history: Optional[Sequence[ChatTurn]], keep: int = 4) -> List[
     return [{"role": t.role, "content": t.content} for t in list(history)[-keep:]]
 
 
+def _creator_from_stored(row) -> Optional[Creator]:
+    """One creator as persisted on an assistant turn, or None if unusable."""
+    if not isinstance(row, dict):
+        return None
+    name = str(row.get("name") or "").strip()
+    if not name:
+        return None
+    handle = row.get("handle")
+    handle = str(handle).strip().lstrip("@") or None if handle else None
+    platform = str(row.get("platform") or "").strip().lower() or None
+    if platform not in ("tiktok", "instagram"):
+        platform = None
+    return Creator(
+        name=name,
+        handle=handle,
+        platform=platform,
+        why=str(row.get("why") or "").strip()[:200],
+        source_url=row.get("source_url") or None,
+        profile_url=row.get("profile_url") or None,
+    )
+
+
+def _creators_from_content(content: str) -> List[Creator]:
+    """Creators stored as JSON on an assistant turn. Empty when there are none."""
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return []
+    rows = data.get("creators") if isinstance(data, dict) else None
+    if not isinstance(rows, list):
+        return []
+    out: List[Creator] = []
+    for row in rows:
+        one = _creator_from_stored(row)
+        if one is not None:
+            out.append(one)
+    return out
+
+
+def _creators_shown(history: Optional[Sequence[ChatTurn]] = None) -> List[Creator]:
+    """The last list of people the operator was shown.
+
+    Stored on the assistant turn as structured `creators`. The router has to
+    see this list to resolve a follow-up that points at it; the page dump in
+    `web_results` does not make the names obvious, and the operator's words
+    often do not repeat them.
+    """
+    for turn in reversed(list(history or [])):
+        if getattr(turn, "role", None) != "assistant":
+            continue
+        found = _creators_from_content(str(getattr(turn, "content", "") or ""))
+        if found:
+            return found
+    return []
+
+
+def _roster_text(creators: Sequence[Creator]) -> str:
+    """A short list the router can actually read. Not a rule — the names."""
+    if not creators:
+        return ""
+    lines = ["People already on screen from the last search:"]
+    for creator in creators:
+        if creator.handle:
+            plat = f" ({creator.platform})" if creator.platform else ""
+            lines.append(f"- {creator.name} @{creator.handle}{plat}")
+        else:
+            lines.append(f"- {creator.name} — no handle")
+    return "\n".join(lines)
+
+
+def _plan_from_content(content: str) -> Optional[dict]:
+    """A stored ResearchPlan, or None. Review turns are not plans."""
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    refs = data.get("reference_accounts")
+    runs = data.get("recommended_runs")
+    if (isinstance(refs, list) and refs) or (isinstance(runs, list) and runs):
+        return data
+    return None
+
+
+def _plan_shown(history: Optional[Sequence[ChatTurn]] = None) -> Optional[dict]:
+    """The last plan the operator was shown, if any."""
+    for turn in reversed(list(history or [])):
+        if getattr(turn, "role", None) != "assistant":
+            continue
+        plan = _plan_from_content(str(getattr(turn, "content", "") or ""))
+        if plan:
+            return plan
+    return None
+
+
+def _plan_text(plan: Optional[dict]) -> str:
+    """A short reading of the plan on screen. Empty when there is none."""
+    if not plan:
+        return ""
+    refs = plan.get("reference_accounts") if isinstance(plan.get("reference_accounts"), list) else []
+    runs = plan.get("recommended_runs") if isinstance(plan.get("recommended_runs"), list) else []
+    if not refs and not runs:
+        return ""
+    lines = ["A research plan is already on screen:"]
+    for acc in refs:
+        if not isinstance(acc, dict):
+            continue
+        handles = [str(h).lstrip("@") for h in (acc.get("handles") or []) if h]
+        plats = [str(p) for p in (acc.get("platforms") or []) if p]
+        niche = str(acc.get("niche") or "").strip()
+        who = ", ".join(f"@{h}" for h in handles) or "named accounts"
+        where = ", ".join(plats) or "platform unset"
+        line = f"- scrape {who} on {where}"
+        if niche:
+            line += f", niche {niche}"
+        lines.append(line)
+    for run in runs:
+        if not isinstance(run, dict):
+            continue
+        niche = str(run.get("niche") or "").strip() or "discovery"
+        plats = ", ".join(str(p) for p in (run.get("platforms") or []) if p)
+        countries = ", ".join(str(c) for c in (run.get("countries") or []) if c)
+        bits = [niche]
+        if plats:
+            bits.append(plats)
+        if countries:
+            bits.append(countries)
+        lines.append("- discovery run: " + " · ".join(bits))
+    return "\n".join(lines)
+
+
+def _turns_for_router(
+    history: Optional[Sequence[ChatTurn]], keep: int = 4
+) -> List[dict]:
+    """History for routing, without the page dump that buries the names.
+
+    A stored ResearchPlan is kept as a short reading of it. Slimming every
+    assistant JSON to clarifying_question left plan turns as "{}", so
+    "change the niche to music_man" had no plan to edit and was searched.
+    """
+    out: List[dict] = []
+    for turn in list(history or [])[-keep:]:
+        role = getattr(turn, "role", None)
+        content = str(getattr(turn, "content", "") or "")
+        if role == "assistant":
+            try:
+                data = json.loads(content)
+            except ValueError:
+                data = None
+            if isinstance(data, dict):
+                plan_line = _plan_text(data)
+                if plan_line:
+                    content = plan_line
+                elif any(
+                    key in data
+                    for key in ("clarifying_question", "creators", "web_results")
+                ):
+                    slim = {
+                        key: data.get(key)
+                        for key in (
+                            "clarifying_question",
+                            "understood_so_far",
+                            "missing_fields",
+                        )
+                        if key in data
+                    }
+                    content = json.dumps(slim, ensure_ascii=False)
+        if role in ("user", "assistant") and content:
+            out.append({"role": role, "content": content})
+    return out
+
+
 ACTIONS = {"search", "respond", "ask", "plan", "skip"}
 
 # What a search is being asked FOR, which decides what the review turn shows.
@@ -509,6 +692,24 @@ def triage_search(
     decision away, only to ask something better able to make it. It costs a
     second call on a narrow slice of turns and nothing on the rest.
     """
+    # People already on screen is a follow-up the small model keeps treating
+    # as a new hunt. The larger model is the one measured able to resolve
+    # "those" from a list. No wording is inspected: the structured list from
+    # the last search is the only signal, and the model still decides what
+    # the operator meant.
+    shown = _creators_shown(history)
+    plan = _plan_shown(history)
+    if (shown or plan) and escalation_model and escalation_model != model:
+        logger.info(
+            "web grounding: %s on screen — routing with %s",
+            ("people" if shown else "a plan"), escalation_model,
+        )
+        return _route_once(
+            prompt, ctx, history,
+            openai_key=openai_key, model=escalation_model, timeout=timeout,
+            max_tokens=500,
+        )
+
     routed = _route_once(
         prompt, ctx, history, openai_key=openai_key, model=model, timeout=timeout
     )
@@ -570,12 +771,19 @@ def _route_once(
     openai_key: str,
     model: str,
     timeout: float,
+    max_tokens: int = 250,
 ) -> dict:
     """One routing call to one model."""
 
     client = OpenAI(api_key=openai_key, timeout=timeout)
     messages = [{"role": "system", "content": TRIAGE_SYSTEM}]
-    messages.extend(_recent_turns(history))
+    roster = _roster_text(_creators_shown(history))
+    if roster:
+        messages.append({"role": "system", "content": roster})
+    plan_block = _plan_text(_plan_shown(history))
+    if plan_block:
+        messages.append({"role": "system", "content": plan_block})
+    messages.extend(_turns_for_router(history))
     # Fenced for the same reason the planner fences it: this is the operator's
     # text, and it is data rather than instruction.
     messages.append(
@@ -586,7 +794,7 @@ def _route_once(
         model=model,
         messages=messages,
         temperature=0,
-        max_tokens=250,
+        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )
     parsed = extract_json_object(response.choices[0].message.content or "")
@@ -2156,6 +2364,65 @@ def resolve_seed(
     return None
 
 
+def _lookup_one_subject(
+    name: str, shown: Sequence[Creator], *, settings
+) -> Creator:
+    """One named person, with a handle if we can find one.
+
+    People already on screen keep their card. A handle already found is not
+    searched again. Everyone else goes through resolve_seed — the same lookup
+    a comparison uses for a bare name — instead of a new landscape search.
+    """
+    existing = next((c for c in shown if _is_a_subject(c, [name])), None)
+    if existing and existing.handle:
+        return existing
+    resolved = resolve_seed(name, settings=settings)
+    if resolved is None:
+        return existing or Creator(name=name)
+    found = dict(
+        handle=resolved.handle,
+        platform=resolved.platform,
+        profile_url=resolved.url or profile_url(resolved.handle, resolved.platform),
+    )
+    if existing:
+        return existing.model_copy(update=found)
+    return Creator(name=name, **found)
+
+
+def _subjects_already_shown(
+    subjects: Sequence[str], shown: Sequence[Creator]
+) -> bool:
+    """Are these the people already on screen? No list, or a new name, is not."""
+    if not subjects or not shown:
+        return False
+    return any(_is_a_subject(creator, subjects) for creator in shown)
+
+
+def _lookup_subjects(
+    subjects: Sequence[str],
+    shown: Sequence[Creator],
+    *,
+    settings,
+) -> List[Creator]:
+    """The people the router named, looked up one by one.
+
+    Called because `subjects` is filled, not because of any wording. The
+    operator's follow-up is the router's job; walking the names is ours.
+    """
+    out: List[Creator] = []
+    seen = set()
+    for raw in list(subjects)[:MAX_SUBJECT_LOOKUPS]:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        key = _norm_subject(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(_lookup_one_subject(name, shown, settings=settings))
+    return out
+
+
 def _verify_seed(
     label: str,
     candidates: Sequence[tuple],
@@ -3698,6 +3965,69 @@ def gather_web_context(
         subjects = []
         if seeds:
             logger.info("web grounding: %r are seeds, not the answer — searching for others", seeds)
+
+    # Named people already on screen: look those names up instead of starting
+    # a new hunt that throws the list away. A NEW name — "who is Ernest Obeng?"
+    # after a scrape plan for @isaac — is a search. There is no list to walk.
+    shown = _creators_shown(history)
+    if subjects and _subjects_already_shown(subjects, shown):
+        emit(
+            "searching",
+            query=", ".join(subjects[:8]),
+            detail="Looking up the people already on screen",
+        )
+        lookup_started = time.perf_counter()
+        creators = _lookup_subjects(subjects, shown, settings=settings)
+        search_ms = int((time.perf_counter() - lookup_started) * 1000)
+        if any(c.handle for c in creators):
+            findings = [
+                WebFinding(
+                    title=c.name,
+                    url=url,
+                    snippet=c.why or "",
+                    content=c.why or "",
+                )
+                for c in creators
+                if (url := (c.profile_url or c.source_url or ""))
+            ]
+            if findings:
+                prose, next_step = _write_answer(
+                    findings, prompt, answer="creators", markets=[],
+                    creators=creators, history=history, settings=settings,
+                )
+            else:
+                prose, next_step = None, None
+            logger.info(
+                "web grounding: looked up %d subjects, %d with a handle",
+                len(creators), sum(1 for c in creators if c.handle),
+            )
+            emit(
+                "found",
+                creators=len(creators),
+                hashtags=0,
+                sources=len(findings),
+                detail=(
+                    f"Found {sum(1 for c in creators if c.handle)} "
+                    f"handle{'s' if sum(1 for c in creators if c.handle) != 1 else ''}"
+                ),
+            )
+            return WebContext(
+                action="search",
+                query=", ".join(subjects),
+                findings=findings,
+                creators=creators,
+                prose=prose,
+                next_step=next_step,
+                country=market.iso if market else None,
+                answer="creators",
+                provider="lookup",
+                search_ms=search_ms,
+                triage_ms=triage_ms,
+            )
+        logger.info(
+            "web grounding: lookup found no handles for %r — searching",
+            subjects,
+        )
 
     # Ask what "similar" means BEFORE spending the search, not after.
     #

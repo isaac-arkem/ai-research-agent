@@ -285,6 +285,50 @@ def platform_clarifying_question(handles: Sequence[str]) -> str:
     )
 
 
+def _creators_rows_from_turn(content: str) -> List[dict]:
+    """The `creators` array stored on an assistant turn, or empty."""
+    try:
+        data = json.loads(content)
+    except (ValueError, TypeError):
+        return []
+    rows = data.get("creators") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else []
+
+
+def accounts_shown_in_history(
+    history: Optional[Iterable] = None,
+) -> List[KnownAccount]:
+    """Handles we already found in this thread, with the platform we found them on.
+
+    The catalog is not the only place a platform is known. A search turn stores
+    creators on the assistant message; asking which platform @x is on after we
+    just returned @x on Instagram is asking a question we already answered.
+
+    Latest turn that named a handle wins, so a later lookup overrides an
+    earlier card that had no platform.
+    """
+    found: List[KnownAccount] = []
+    seen = set()
+    for turn in reversed(list(history or [])):
+        if _role_of(turn) != "assistant":
+            continue
+        for row in _creators_rows_from_turn(_content_of(turn)):
+            if not isinstance(row, dict):
+                continue
+            handle = _clean_handle(str(row.get("handle") or ""))
+            platform = str(row.get("platform") or "").strip().lower()
+            if not handle or platform not in VALID_PLATFORMS:
+                continue
+            if handle in seen:
+                continue
+            seen.add(handle)
+            found.append(
+                KnownAccount(handle=handle, platform=platform, niche=None)
+            )
+    found.reverse()
+    return found
+
+
 def known_accounts_from_text(
     prompt: str,
     history: Optional[Iterable] = None,
@@ -292,4 +336,13 @@ def known_accounts_from_text(
     client=None,
 ) -> List[KnownAccount]:
     texts = _user_texts(prompt, history)
-    return lookup_known_accounts(extract_handles(*texts), client=client)
+    catalog = lookup_known_accounts(extract_handles(*texts), client=client)
+    have = {(a.handle.lower(), a.platform) for a in catalog}
+    extra: List[KnownAccount] = []
+    for account in accounts_shown_in_history(history):
+        key = (account.handle.lower(), account.platform)
+        if key in have:
+            continue
+        extra.append(account)
+        have.add(key)
+    return catalog + extra

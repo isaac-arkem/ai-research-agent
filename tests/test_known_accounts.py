@@ -1,9 +1,11 @@
 from app.models.domain import AgentContext, MarketEntry, TaxonomyEntry
 from app.services.known_accounts import (
     KnownAccount,
+    accounts_shown_in_history,
     extract_handles,
     handles_needing_platform,
     accounts_are_references,
+    known_accounts_from_text,
     lookup_known_accounts,
     platform_clarifying_question,
     shared_job_niche,
@@ -102,7 +104,8 @@ def test_prompt_tells_the_model_not_to_ask_for_catalog_fields():
             KnownAccount(handle="isaac", platform="tiktok", niche="cooking_mum"),
         ],
     )
-    assert "KNOWN ACCOUNTS ALREADY IN THE CATALOG" in prompt
+    assert "KNOWN ACCOUNTS" in prompt
+    assert "Do not ask which platform they are on" in prompt
     assert "@isaac | tiktok | cooking_mum" in prompt
     assert "SHARED JOB NICHE: cooking_mum" in prompt
     assert "Apply this niche to EVERY handle in the current request" in prompt
@@ -179,5 +182,87 @@ def test_picking_an_option_does_not_restart_a_named_account_job():
     # job about @isaac, is wrong — but it is wrong the same way it was before
     # any of this, and fixing it is a change to how a job inherits handles.
     assert "kevinhart4real" in still_asked
+
+
+def test_a_handle_already_shown_with_a_platform_is_not_asked_again():
+    """The planner sees eight turns of history. The Python gate that asks
+    which platform @x is on did not: it only looked at what the operator
+    typed, so 'scrape @mikhail_litvin' after we had just returned him on
+    Instagram asked the question we had already answered."""
+    import json
+    from app.models.domain import ChatTurn
+    from app.services.known_accounts import (
+        accounts_shown_in_history,
+        known_accounts_from_text,
+    )
+
+    shown = ChatTurn(
+        role="assistant",
+        content=json.dumps({
+            "clarifying_question": "Need more details?",
+            "missing_fields": [],
+            "creators": [{
+                "name": "Mikhail Litvin",
+                "handle": "mikhail_litvin",
+                "platform": "instagram",
+                "why": "engaging lifestyle vlogs and collaborations",
+            }],
+        }),
+    )
+    later_ask = ChatTurn(
+        role="assistant",
+        content=json.dumps({
+            "clarifying_question": "Which platform is @mikhail_litvin on?",
+            "missing_fields": ["platform"],
+        }),
+    )
+    history = [
+        ChatTurn(role="user", content="can you get me his handle??"),
+        shown,
+        ChatTurn(role="user", content="scrape @mikhail_litvin"),
+        later_ask,
+    ]
+
+    found = accounts_shown_in_history(history)
+    assert [(a.handle, a.platform) for a in found] == [
+        ("mikhail_litvin", "instagram"),
+    ]
+
+    known = known_accounts_from_text(
+        "the platform is already available, it was part of the results",
+        history,
+        client=_Client([]),
+    )
+    assert any(
+        a.handle == "mikhail_litvin" and a.platform == "instagram" for a in known
+    )
+    assert handles_needing_platform(
+        "scrape @mikhail_litvin", history, known
+    ) == []
+    assert handles_needing_platform(
+        "the platform is already available, it was part of the results",
+        history, known,
+    ) == []
+    assert handles_needing_platform(
+        "i mean scrape Mikhail Litvin, dont you already know its platform???",
+        history, known,
+    ) == []
+
+
+def test_a_handle_never_shown_still_needs_a_platform():
+    """The gate only skips the question when this thread already named one."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="find cooking creators in Ghana"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"Do these look right?",'
+                         '"missing_fields":[],"creators":[]}'),
+    ]
+    known = known_accounts_from_text(
+        "scrape @ernest", history, client=_Client([]),
+    )
+    assert known == []
+    assert handles_needing_platform("scrape @ernest", history, known) == ["ernest"]
 
 

@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.models.domain import AgentContext, Creator, MarketEntry, WebFinding
+from app.models.domain import AgentContext, ChatTurn, Creator, MarketEntry, WebFinding
 from app.services.grounding import (
     _basis_already_asked,
     MAX_CONTENT_CHARS,
@@ -2178,6 +2178,356 @@ def test_the_router_is_told_when_to_set_a_subject():
     assert "[] almost always" in TRIAGE_SYSTEM
     assert "A FOLLOW-UP THAT NARROWS A LIST DOWN TO PARTICULAR PEOPLE" in TRIAGE_SYSTEM
     assert "AN ACCOUNT IS AN @HANDLE OR A PROFILE URL" in TRIAGE_SYSTEM
+
+
+def _shown(*creators):
+    """An assistant turn the way the store actually writes it: structured
+    creators plus a page dump the router must not have to mine."""
+    import json
+    from app.models.domain import ChatTurn
+
+    return ChatTurn(
+        role="assistant",
+        content=json.dumps({
+            "clarifying_question": "Do these look right?",
+            "understood_so_far": "Russian creators",
+            "missing_fields": [],
+            "creators": [c.model_dump() for c in creators],
+            "web_results": "<<<WEB_RESULTS\nbury the names in a page dump\nWEB_RESULTS>>>",
+        }),
+    )
+
+
+def test_the_last_shown_creators_are_read_off_the_assistant_turn():
+    from app.services.grounding import _creators_shown, _roster_text
+
+    history = [
+        ChatTurn(role="user", content="creators from russia"),
+        _shown(
+            Creator(name="Mikhail Litvin"),
+            Creator(name="Verona Bernikova", handle="verona", platform="instagram"),
+        ),
+    ]
+    shown = _creators_shown(history)
+    assert [c.name for c in shown] == ["Mikhail Litvin", "Verona Bernikova"]
+    roster = _roster_text(shown)
+    assert "Mikhail Litvin — no handle" in roster
+    assert "@verona" in roster
+    assert "WEB_RESULTS" not in roster
+
+
+def test_the_router_is_handed_the_on_screen_list_not_the_page_dump():
+    """The follow-up points at people already shown. The router has to see
+    those names as a list, not buried in twenty pages of web_results."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="creators from russia"),
+        _shown(Creator(name="Mikhail Litvin"), Creator(name="Dava")),
+    ]
+    client = _triage(
+        '{"action":"search","topic":"t","answer":"creators",'
+        '"subjects":["Mikhail Litvin","Dava"]}'
+    )
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(
+            "can i get the handles for those whose handles are not in the list?",
+            _ctx(), history, openai_key="sk",
+            model="gpt-4o-mini", escalation_model="gpt-4o",
+        )
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    joined = "\n".join(m["content"] for m in messages)
+    assert "Mikhail Litvin" in joined
+    assert "Dava" in joined
+    assert "no handle" in joined
+    assert "WEB_RESULTS" not in joined
+    assert "bury the names" not in joined
+
+
+def test_people_on_screen_are_routed_by_the_larger_model():
+    """A follow-up about a list already shown is the case gpt-4o-mini treats
+    as a new hunt. The larger model is asked first; nothing in the operator's
+    wording is inspected."""
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="creators from russia"),
+        _shown(Creator(name="Mikhail Litvin")),
+    ]
+    client = _triage(
+        '{"action":"search","topic":"t","answer":"creators",'
+        '"subjects":["Mikhail Litvin"]}'
+    )
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(
+            "can i get the handles for those whose handles are not in the list?",
+            _ctx(), history, openai_key="sk",
+            model="gpt-4o-mini", escalation_model="gpt-4o",
+        )
+    assert _models_asked(client) == ["gpt-4o"]
+
+
+def test_a_first_turn_is_still_routed_by_the_small_model():
+    client = _triage('{"action":"search","topic":"creators from russia"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(
+            "creators from russia", _ctx(), openai_key="sk",
+            model="gpt-4o-mini", escalation_model="gpt-4o",
+        )
+    assert _models_asked(client) == ["gpt-4o-mini"]
+
+
+def _plan_turn(**account):
+    """An assistant turn the way a FLOW 3 plan is actually stored."""
+    import json
+    from app.models.domain import ChatTurn
+
+    body = {
+        "summary": "Scrape the TikTok account of @isaac.",
+        "assumptions": [],
+        "recommended_runs": [],
+        "reference_accounts": [{
+            "pipeline": "reference_profiles",
+            "handles": account.get("handles", ["isaac"]),
+            "platforms": account.get("platforms", ["tiktok"]),
+            "niche": account.get("niche", "general_content"),
+            "posts_per_source": 10,
+            "recency_days": None,
+            "rationale": "named account",
+        }],
+        "patterns_to_watch": [],
+        "content_angles": [],
+        "risks": [],
+    }
+    return ChatTurn(role="assistant", content=json.dumps(body))
+
+
+def test_a_stored_plan_is_not_stripped_to_empty_for_the_router():
+    """Slimming every assistant JSON to clarifying_question turned a
+    ResearchPlan into '{}', so 'change the niche to music_man' had nothing
+    to edit and was searched as a new topic."""
+    from app.models.domain import ChatTurn
+    from app.services.grounding import _turns_for_router, _plan_text
+
+    history = [
+        ChatTurn(role="user", content="scrape @isaac"),
+        ChatTurn(role="assistant",
+                 content='{"clarifying_question":"Which platform is @isaac on?",'
+                         '"missing_fields":["platform"]}'),
+        ChatTurn(role="user", content="tiktok"),
+        _plan_turn(),
+    ]
+    joined = "\n".join(m["content"] for m in _turns_for_router(history))
+    assert "scrape @isaac on tiktok" in joined
+    assert "niche general_content" in joined
+    assert joined.strip() != "{}"
+    assert _plan_text({"reference_accounts": []}) == ""
+
+
+def test_a_plan_on_screen_is_handed_to_the_router():
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="tiktok"),
+        _plan_turn(),
+    ]
+    client = _triage('{"action":"skip","reason":"editing the plan"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(
+            "change the niche to music_man", _ctx(), history,
+            openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o",
+        )
+    messages = client.chat.completions.create.call_args.kwargs["messages"]
+    joined = "\n".join(m["content"] for m in messages)
+    assert "A research plan is already on screen" in joined
+    assert "@isaac" in joined
+    assert "tiktok" in joined
+
+
+def test_a_plan_on_screen_is_routed_by_the_larger_model():
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="tiktok"),
+        _plan_turn(),
+    ]
+    client = _triage('{"action":"skip","reason":"editing the plan"}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        triage_search(
+            "change the niche to music_man", _ctx(), history,
+            openai_key="sk", model="gpt-4o-mini", escalation_model="gpt-4o",
+        )
+    assert _models_asked(client) == ["gpt-4o"]
+
+
+def test_editing_a_plan_does_not_start_a_new_search():
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="scrape @isaac"),
+        ChatTurn(role="user", content="tiktok"),
+        _plan_turn(),
+    ]
+    client = _triage('{"action":"skip","reason":"parameter tweak"}')
+    with patch("app.services.grounding.OpenAI", return_value=client), \
+         patch("app.services.grounding.provider_from_settings") as provider:
+        web = gather_web_context(
+            "change the niche to music_man", _ctx(), history,
+            settings=_settings(),
+        )
+    provider.assert_not_called()
+    assert web.action == "skip"
+
+
+def test_the_router_is_told_that_editing_a_plan_is_skip():
+    from app.services.grounding import TRIAGE_SYSTEM
+
+    assert "A RESEARCH PLAN ALREADY IN THIS THREAD IS ALSO" in TRIAGE_SYSTEM
+    assert "change the niche to music_man" in TRIAGE_SYSTEM
+
+
+def test_named_subjects_are_looked_up_instead_of_a_new_hunt():
+    """The Russia failure: subjects named the people on screen, and a new
+    Tavily query still ran — 'handles for Russian creators not listed' —
+    which returned two strangers. Looking the named people up is the job."""
+    from app.models.domain import ChatTurn
+    from app.services.grounding import ResolvedSeed
+
+    history = [
+        ChatTurn(role="user", content="creators from russia"),
+        _shown(
+            Creator(name="Mikhail Litvin"),
+            Creator(name="Dava"),
+            Creator(name="Verona Bernikova", handle="verona", platform="instagram"),
+        ),
+    ]
+    routed = (
+        '{"action":"search","topic":"handles for Russian creators not listed",'
+        '"answer":"creators","subjects":["Mikhail Litvin","Dava"]}'
+    )
+    found = {
+        "Mikhail Litvin": ResolvedSeed(
+            name="Mikhail Litvin", handle="litvin", platform="instagram",
+            url="https://www.instagram.com/litvin/",
+        ),
+        "Dava": ResolvedSeed(
+            name="Dava", handle="dava", platform="tiktok",
+            url="https://www.tiktok.com/@dava",
+        ),
+    }
+
+    def _resolve(name, **_kw):
+        return found.get(name)
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding.resolve_seed", side_effect=_resolve), \
+         patch("app.services.grounding.provider_from_settings") as provider, \
+         patch("app.services.grounding._write_answer", return_value=(None, None)):
+        web = gather_web_context(
+            "can i get the handles for those whose handles are not in the list?",
+            _ctx(), history, settings=_settings(),
+        )
+
+    provider.assert_not_called()
+    assert web.provider == "lookup"
+    assert [c.name for c in web.creators] == ["Mikhail Litvin", "Dava"]
+    assert [c.handle for c in web.creators] == ["litvin", "dava"]
+    # People on screen who already had a handle, and were not asked about,
+    # stay off this answer.
+    assert all(c.name != "Verona Bernikova" for c in web.creators)
+
+
+def test_a_new_name_after_a_plan_is_searched_not_looked_up():
+    """'who is Ernest Obeng?' after scraping @isaac is not walking a list.
+    There is no list. Looking the name up returned 0 sources and skipped the web."""
+    from app.models.domain import ChatTurn
+    from unittest.mock import MagicMock
+
+    history = [
+        ChatTurn(role="user", content="scrape @isaac"),
+        ChatTurn(role="user", content="tiktok"),
+        _plan_turn(),
+    ]
+    routed = (
+        '{"action":"search","topic":"who is Ernest Obeng",'
+        '"answer":"creators","subjects":["Ernest Obeng"]}'
+    )
+    provider = SimpleNamespace(name="tavily", search=MagicMock(return_value=_results(3)))
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding.resolve_seed") as resolver, \
+         patch("app.services.grounding.extract_creators",
+               return_value=([], [])), \
+         patch("app.services.grounding.provider_from_settings",
+               return_value=provider), \
+         patch("app.services.grounding._write_answer", return_value=(None, None)):
+        web = gather_web_context(
+            "who is ernest obeng?", _ctx(), history, settings=_settings(),
+        )
+
+    resolver.assert_not_called()
+    provider.search.assert_called()
+    assert web.provider != "lookup"
+    assert len(web.findings) == 3
+
+
+def test_a_lookup_that_finds_no_handle_falls_through_to_search():
+    """A failed lookup must not be shown as '1 creator, 0 sources'. Search."""
+    from unittest.mock import MagicMock
+
+    history = [
+        _shown(Creator(name="Ernest Obeng")),
+    ]
+    routed = (
+        '{"action":"search","topic":"Ernest Obeng KNUST greentech",'
+        '"answer":"creators","subjects":["Ernest Obeng"]}'
+    )
+    provider = SimpleNamespace(name="tavily", search=MagicMock(return_value=_results(3)))
+    with patch("app.services.grounding.OpenAI", return_value=_triage(routed)), \
+         patch("app.services.grounding.resolve_seed", return_value=None), \
+         patch("app.services.grounding.extract_creators",
+               return_value=([], [])), \
+         patch("app.services.grounding.provider_from_settings",
+               return_value=provider), \
+         patch("app.services.grounding._write_answer", return_value=(None, None)):
+        web = gather_web_context(
+            "the ernest obeng i am looking for completed KNUST",
+            _ctx(), history, settings=_settings(),
+        )
+
+    provider.search.assert_called()
+    assert web.provider != "lookup"
+    assert len(web.findings) == 3
+
+
+def test_a_subject_that_already_has_a_handle_is_not_looked_up_again():
+    from app.models.domain import ChatTurn
+    from app.services.grounding import _lookup_subjects
+
+    shown = [
+        Creator(name="Verona Bernikova", handle="verona", platform="instagram"),
+        Creator(name="Mikhail Litvin"),
+    ]
+    with patch("app.services.grounding.resolve_seed") as resolver:
+        got = _lookup_subjects(
+            ["Verona Bernikova", "Mikhail Litvin"], shown,
+            settings=_settings(),
+        )
+    assert got[0].handle == "verona"
+    assert resolver.call_count == 1
+    assert resolver.call_args.args[0] == "Mikhail Litvin"
+
+
+def test_an_unresolved_subject_stays_on_the_list_without_a_handle():
+    """Looking them up and finding nothing is still those people, not a new hunt."""
+    from app.services.grounding import _lookup_subjects
+
+    shown = [Creator(name="Mikhail Litvin", why="lifestyle vlogs")]
+    with patch("app.services.grounding.resolve_seed", return_value=None):
+        got = _lookup_subjects(["Mikhail Litvin"], shown, settings=_settings())
+    assert len(got) == 1
+    assert got[0].name == "Mikhail Litvin"
+    assert got[0].handle is None
+    assert got[0].why == "lifestyle vlogs"
 
 
 # ── the router is upgraded, never overridden ─────────────────────────
