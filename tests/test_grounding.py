@@ -1829,6 +1829,54 @@ def test_the_next_step_is_written_from_this_result():
     assert review_question_for(web) == "Search Instagram to balance this out?"
 
 
+def test_a_creator_list_is_offered_as_a_scrape_plan():
+    """The research follow-up stays; the list exists so they can set up a job.
+    A next question that only offers to search more is how the plan never
+    gets written."""
+    from app.services.grounding import SYNTHESIS_SYSTEM
+
+    assert "write a scrape plan" in SYNTHESIS_SYSTEM
+    assert "some of the accounts" in SYNTHESIS_SYSTEM
+    assert "no handle found" in SYNTHESIS_SYSTEM
+
+
+def test_synthesis_is_told_to_offer_the_plan_when_handles_are_on_the_list():
+    from app.models.domain import Hashtag
+    from app.services.grounding import synthesise_findings
+
+    client = _synth(
+        '{"reply": "Most of this is Instagram comedy [1], with a thin TikTok '
+        'side.", "next": "Search TikTok, or write a scrape plan with some of '
+        'these accounts?"}'
+    )
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        synthesise_findings(
+            _finds(2), "q", answer="creators", openai_key="sk",
+            creators=[Creator(name="Gag", handle="gag", platform="instagram")],
+            hashtags=[Hashtag(tag="armeniancomedy", sources=3)],
+        )
+
+    sent = client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
+    assert "THIS LIST IS FOR A SCRAPE PLAN" in sent
+    assert "@gag" in sent
+    assert "#armeniancomedy" in sent
+
+
+def test_a_markets_turn_is_not_nudged_to_plan_from_an_empty_list():
+    """Nothing on screen to scrape. The next step is still which market."""
+    from app.services.grounding import synthesise_findings
+
+    client = _synth(
+        '{"reply": "Nigeria leads on size and growth [1], Kenya close behind.",'
+        ' "next": "Dig into Nigeria?"}'
+    )
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        synthesise_findings(_finds(2), "q", answer="markets", openai_key="sk")
+
+    sent = client.chat.completions.create.call_args.kwargs["messages"][-1]["content"]
+    assert "THIS LIST IS FOR A SCRAPE PLAN" not in sent
+
+
 def test_quick_depth_is_not_the_default_because_it_allows_one_subquery():
     """planner._sanitize_plan hard-truncates a "quick" plan to ONE subquery:
 
@@ -4193,9 +4241,44 @@ def test_the_router_platform_opens_the_lane_as_well_as_silencing_the_question():
 def test_the_words_still_win_when_they_are_there():
     """The router's reading is the FALLBACK, not the override. If they typed
     "tiktok" the lane is TikTok, whatever a model decided."""
-    from app.services.grounding import platforms_named
+    from app.services.grounding import _spend_lanes, platforms_named
 
     assert platforms_named("dance creators on tiktok") == ["tiktok"]
+    assert _spend_lanes(
+        "dance creators on tiktok",
+        "dance creators on tiktok",
+        "both",
+    ) == ["tiktok"]
+
+
+def test_asking_for_both_opens_instagram_even_when_the_topic_still_says_tiktok():
+    """The rewritten topic kept "tiktok", so the first-non-empty lane list
+    never looked at Instagram — and a request for both came back TikTok-only
+    with Instagram recorded as zero."""
+    from app.services.grounding import _spend_lanes
+
+    assert _spend_lanes(
+        "search both on tiktok and instagram",
+        "cooking creators Ghana on tiktok",
+        "both",
+    ) == ["tiktok", "instagram"]
+    # Bare "both" after a TikTok-heavy rewrite: this message names no
+    # platform word, so the router is what opens the other lane.
+    assert _spend_lanes(
+        "both", "cooking creators Ghana on tiktok", "both",
+    ) == ["instagram", "tiktok"]
+
+
+def test_on_the_gram_still_opens_instagram_when_the_topic_mentions_tiktok():
+    """A leftover "tiktok" in the rewritten topic must not veto Instagram
+    when this message named none and the router read Instagram."""
+    from app.services.grounding import _spend_lanes
+
+    assert _spend_lanes(
+        "on the gram",
+        "beauty creators similar to @iamhamamat on tiktok",
+        "instagram",
+    ) == ["instagram"]
 
 
 # --------------------------------------------------------------------------

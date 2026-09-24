@@ -1023,20 +1023,23 @@ Return JSON only:
 "next" — one short question offering the concrete next step, built from THIS result.
 
 - Name the real options that exist right now: the actual markets found, the actual platforms covered, the gap worth filling.
+- Keep the research fork when there is a real gap to fill. That question is useful and stays.
+- WHEN CREATORS OR HASHTAGS ARE ON THE LIST, always offer writing a scrape plan from them as the other fork. The list is there so they can set up a job. They can keep digging or plan with what they already have — some of the accounts, all of them, or the hashtags. A research-only next question is how the job never gets written.
+- Offer the plan only for what can actually be scraped: handles that exist, or hashtags. A name with "no handle found" is not a scrape target.
 - Never a generic prompt. "Do these look right?" tells the operator nothing they could not have guessed.
-- One question. Two at the very most.
+- One question that names both forks when both exist. Not two stacked questions.
 
 Examples of the whole thing:
 
-  markets, first turn:
+  markets, first turn (nothing to scrape yet):
   {"reply": "Nigeria is the strongest of these by some distance — 40% of Africa's creator-economy value and over 250,000 influencers [2]. Kenya and South Africa are real but smaller, and they differ in how creators actually get paid: M-Pesa tips in Kenya, brand sponsorships in South Africa [3].",
    "next": "Want me to dig into Nigeria, or compare it against Kenya first?"}
 
   creators, after "let's dig into nigeria":
   {"reply": "Nigeria's top creators skew heavily to TikTok — five of the six here came out of TikTok's own 2025 awards [1], so this is a view of that platform rather than the market. Food and comedy dominate; @diaryofanortherncook is the clearest fit if Northern Nigerian cuisine is the angle.",
-   "next": "Should I search Instagram specifically to balance this out, or plan a scrape with these TikTok accounts?"}
+   "next": "Should I search Instagram specifically to balance this out, or write a scrape plan with some of these accounts?"}
 
-NEVER OFFER A NEXT STEP THIS SYSTEM CANNOT TAKE. The platforms it can actually search are listed for you below; YouTube, X, Facebook, LinkedIn, Twitch and the rest are not among them. Offering to "look on YouTube" reads as a real option, costs the operator a turn to accept, and then cannot be done — the search runs on the open web and comes back with the same kind of page it already had.
+NEVER OFFER A NEXT STEP THIS SYSTEM CANNOT TAKE. The platforms it can actually search are listed for you below; YouTube, X, Facebook, LinkedIn, Twitch and the rest are not among them. Offering to "look on YouTube" reads as a real option, costs the operator a turn to accept, and then cannot be done — the search runs on the open web and comes back with the same kind of page it already had. Writing a scrape plan from the list on screen IS a next step this system can take.
 
 You may still SAY that the evidence leans one way. "Almost all of this is Instagram" is a fact about what came back. "Shall I check YouTube?" is a promise. The first is useful; the second is not yours to make."""
 
@@ -1077,6 +1080,7 @@ def synthesise_findings(
     answer: str,
     markets: Optional[Sequence[MarketFinding]] = None,
     creators: Optional[Sequence[Creator]] = None,
+    hashtags: Optional[Sequence[Hashtag]] = None,
     history: Optional[Sequence[ChatTurn]] = None,
     openai_key: str,
     model: str = "gpt-4o",
@@ -1116,10 +1120,21 @@ def synthesise_findings(
     for c in creators or []:
         handle = f"@{c.handle}" if c.handle else "no handle found"
         extracted.append(f"- creator: {c.name} ({handle}) — {c.why}")
+    for h in hashtags or []:
+        extracted.append(f"- hashtag: #{getattr(h, 'tag', h)}")
     extracted_block = (
         "\n\nAlready extracted from these results:\n" + "\n".join(extracted)
         if extracted else ""
     )
+    scrapeable = any(getattr(c, "handle", None) for c in (creators or []))
+    if scrapeable or hashtags:
+        extracted_block += (
+            "\n\nTHIS LIST IS FOR A SCRAPE PLAN. In \"next\", keep any "
+            "research follow-up that is actually useful, and also offer to "
+            "write a scrape plan from some or all of what is here "
+            "(handles, hashtags, or both). Names with no handle cannot be "
+            "planned as accounts."
+        )
 
     # One exchange of history, so a follow-up answer knows what it is
     # narrowing. More than that and the model starts answering the older
@@ -1952,6 +1967,32 @@ def platforms_named(text: str) -> List[str]:
             if any(word in low for word in spellings)]
 
 
+def _spend_lanes(
+    prompt: str,
+    topic: str,
+    platform: Optional[str],
+) -> List[str]:
+    """Which paid lanes this turn may open.
+
+    This used to take the first non-empty of the rewritten topic, the
+    message, then the router. A topic that still said "tiktok" after they
+    asked for both never looked at Instagram, and the lane was recorded as
+    zero.
+
+    This message wins when it names a platform: "just TikTok" stays TikTok
+    even if the router said both. When this message names none — "both",
+    "on the gram" — the router speaks, including both. The rewritten topic
+    is last, so a leftover "tiktok" cannot veto Instagram.
+    """
+    here = platforms_named(prompt or "")
+    if here:
+        return here
+    router = _lanes_from(platform)
+    if router:
+        return router
+    return platforms_named(topic or "")
+
+
 def market_named(text: str, ctx: AgentContext) -> Optional[str]:
     """A market the operator actually wrote, by country name or ISO code.
 
@@ -2116,6 +2157,7 @@ def _trim(f: WebFinding) -> WebFinding:
 
 def _write_answer(
     findings, prompt, *, answer, markets, creators, history, settings,
+    hashtags=None,
 ):
     """(reply, next step), or (None, None) to fall back to the templates."""
     written = synthesise_findings(
@@ -2124,6 +2166,7 @@ def _write_answer(
         answer=answer,
         markets=markets,
         creators=creators,
+        hashtags=hashtags,
         history=history,
         openai_key=settings.openai_api_key,
         # NOT grounding_model. Synthesis is where a small model shows: it
@@ -3588,11 +3631,7 @@ def _research_via_engine(
         # to ask which platform?" but not for "which lane may spend money",
         # so "on the gram" stopped the question being asked and then left
         # Instagram shut anyway — the worst of both.
-        lanes = (
-            platforms_named(query.text)
-            or platforms_named(prompt)
-            or _lanes_from(platform)
-        )
+        lanes = _spend_lanes(prompt, query.text, platform)
         seed_note = None
         # Not the ones they asked NOT to be like. @_zinatubako was swept for
         # hashtags on a turn that said "but not like @_zinatubako", and its
@@ -3749,7 +3788,7 @@ def _research_via_engine(
     )
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
-        history=history, settings=settings,
+        hashtags=hashtags, history=history, settings=settings,
     )
     # A hunt built on nothing has to say so. Silence here reads exactly like
     # a hunt built on the right person, and the operator cannot tell them
@@ -4230,7 +4269,8 @@ def gather_web_context(
         )
         prose, next_step = _write_answer(
             findings, prompt, answer=answer, markets=markets,
-            creators=creators, history=history, settings=settings,
+            creators=creators, hashtags=hashtags, history=history,
+            settings=settings,
         )
     else:
         creators, hashtags, markets = [], [], []
