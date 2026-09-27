@@ -39,9 +39,9 @@ def bearer_token(request: Request) -> Optional[str]:
 
 
 def _verify_supabase_jwt(settings: Settings, token: str) -> Optional[AuthUser]:
-    url = (settings.next_public_supabase_url or "").rstrip("/")
-    anon = settings.supabase_anon_key
-    if not url or not anon:
+    url = (settings.supabase_url or "").rstrip("/")
+    public = settings.supabase_public_key
+    if not url or not public:
         logger.warning("Auth required but Supabase public key/url missing")
         return None
 
@@ -49,7 +49,7 @@ def _verify_supabase_jwt(settings: Settings, token: str) -> Optional[AuthUser]:
         response = httpx.get(
             f"{url}/auth/v1/user",
             headers={
-                "apikey": anon,
+                "apikey": public,
                 "Authorization": f"Bearer {token}",
             },
             timeout=8.0,
@@ -76,7 +76,7 @@ def get_current_user(
 
     if not settings.auth_required:
         token = bearer_token(request)
-        if token and settings.supabase_anon_key and settings.next_public_supabase_url:
+        if token and settings.supabase_public_key and settings.supabase_url:
             user = _verify_supabase_jwt(settings, token)
             if user:
                 return user
