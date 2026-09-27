@@ -30,13 +30,9 @@ class Settings(BaseSettings):
     # and there is no hardcoded fallback, so requests 503 without it. Still
     # Optional[] so the process can boot and report the problem on /health
     # rather than crashing at import.
-    # Same env var names as arkgpt: NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SECRET_KEY
-    next_public_supabase_url: Optional[str] = None
+    supabase_url: Optional[str] = None
     supabase_secret_key: Optional[str] = None
-
-    # Optional — same names as arkgpt so one .env works for both
-    next_public_supabase_public_key: Optional[str] = None
-    next_public_supabase_anon_key: Optional[str] = None
+    supabase_public_key: Optional[str] = None
 
     # ── Web search ──────────────────────────────────────────────────────
     # Tavily, and only Tavily. See app/services/search/ for why: it returns
@@ -163,11 +159,7 @@ class Settings(BaseSettings):
 
     @property
     def supabase_configured(self) -> bool:
-        return bool(self.next_public_supabase_url and self.supabase_secret_key)
-
-    @property
-    def supabase_anon_key(self) -> Optional[str]:
-        return self.next_public_supabase_public_key or self.next_public_supabase_anon_key
+        return bool(self.supabase_url and self.supabase_secret_key)
 
     @property
     def cors_origin_list(self) -> list:

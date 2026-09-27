@@ -31,7 +31,7 @@ def get_supabase_admin(settings: Optional[Settings] = None) -> Optional[Client]:
 
     try:
         _client = create_client(
-            settings.next_public_supabase_url,
+            settings.supabase_url,
             settings.supabase_secret_key,
         )
         logger.info("Supabase admin client created")

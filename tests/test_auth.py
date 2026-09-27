@@ -8,8 +8,8 @@ def test_auth_required_without_bearer_is_401(client):
     settings = get_settings().model_copy(
         update={
             "auth_required": True,
-            "next_public_supabase_url": "https://example.supabase.co",
-            "next_public_supabase_anon_key": "anon",
+            "supabase_url": "https://example.supabase.co",
+            "supabase_public_key": "anon",
         }
     )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -30,8 +30,8 @@ def test_auth_required_with_valid_bearer(mock_gen, mock_get, client):
     settings = get_settings().model_copy(
         update={
             "auth_required": True,
-            "next_public_supabase_url": "https://example.supabase.co",
-            "next_public_supabase_anon_key": "anon",
+            "supabase_url": "https://example.supabase.co",
+            "supabase_public_key": "anon",
         }
     )
     app.dependency_overrides[get_settings] = lambda: settings
@@ -52,8 +52,8 @@ def test_auth_required_invalid_token_is_401(mock_get, client):
     settings = get_settings().model_copy(
         update={
             "auth_required": True,
-            "next_public_supabase_url": "https://example.supabase.co",
-            "next_public_supabase_anon_key": "anon",
+            "supabase_url": "https://example.supabase.co",
+            "supabase_public_key": "anon",
         }
     )
     app.dependency_overrides[get_settings] = lambda: settings
