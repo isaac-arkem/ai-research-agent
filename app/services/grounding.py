@@ -225,6 +225,19 @@ A QUESTION ABOUT SOMETHING MISSING IS A SEARCH FOR THAT THING. "Why is Sarkodie 
           NOT the original topic re-run — that returns the same list that
           already omitted him, and answers nothing.
 
+A NEW PERSON IS NOT A NARROWING OF THE LAST HUNT. "who is Jane Doe?", "who is John Doe?" name someone who was not the job. That question already stands alone. Copy it VERBATIM. subjects is that person. hashtags []. Do not keep the previous niche, tags, country or platform.
+
+  before: "Find cooking creators in France on Instagram using #exampletag"
+  now:    "who is Jane Doe?"
+  topic:  "who is Jane Doe?"
+  subjects: ["Jane Doe"]
+  hashtags: []
+          NOT "Jane Doe cooking creator" — that searches the last niche.
+
+  now:    "what about Jane Doe" / "why isn't Jane Doe in the list?"
+  topic:  Jane Doe IN the hunt already established
+          Those point at the list. "who is" does not.
+
 "reference_accounts" IS THE ACCOUNTS THEY ARE MEASURING AGAINST, NOT THE ONES THEY WANT.
 
 This is the difference between "go and look at @x" and "find OTHER people, @x is the example". Nobody can list the ways people say the second one — "in the same lane as", "cut from the same cloth as", "in the mould of", "who gives the same energy as", "that give off @x vibes", "his contemporaries", "who else does what @x does", "the @x of Kenya" — so do not try to match words. Decide what they MEAN and put the yardstick handles here.
@@ -2059,6 +2072,57 @@ def _unblock_a_complete_request(routed: dict, text: str, ctx: AgentContext) -> d
     return {**routed, "missing": still_missing}
 
 
+def _new_person_is_the_whole_question(
+    prompt: str,
+    subjects: Sequence[str],
+    shown: Sequence[Creator],
+) -> bool:
+    """A new name asked about as themselves, not as a hole in the last list."""
+    if not subjects or _subjects_already_shown(subjects, shown):
+        return False
+    if re.search(r"#\w", prompt or ""):
+        return False
+    if platforms_named(prompt or ""):
+        return False
+    low = f" {(prompt or '').lower()} "
+    # These point at the hunt already on screen. "who is Jane Doe?" does not.
+    if any(mark in low for mark in (
+        "what about", "why is", "why isn't", "you missed",
+        "the list", " these ", " above ",
+    )):
+        return False
+    folded = _norm_subject(prompt)
+    return all(_norm_subject(name) and _norm_subject(name) in folded for name in subjects)
+
+
+def _unmerge_a_new_person(
+    routed: dict,
+    prompt: str,
+    history: Optional[Sequence[ChatTurn]],
+    ctx: AgentContext,
+) -> dict:
+    """Stop 'who is Jane Doe?' inheriting the last niche.
+
+    The router is taught to merge a follow-up that does not stand alone.
+    A new person's name already stands alone; merging it with the last
+    hunt's tags searches that niche instead of the person.
+    """
+    if routed.get("action") != "search":
+        return routed
+    subjects = [str(n).strip() for n in (routed.get("subjects") or []) if str(n).strip()]
+    if not _new_person_is_the_whole_question(prompt, subjects, _creators_shown(history)):
+        return routed
+    out = dict(routed)
+    out["topic"] = (prompt or "").strip()
+    out["hashtags"] = []
+    if not platforms_named(prompt or ""):
+        out["platform"] = None
+    if ctx is not None and not market_named(prompt or "", ctx):
+        out["country"] = None
+    logger.info("web grounding: new person %s — searching as typed, not the last hunt", subjects)
+    return out
+
+
 def _search_text(prompt: str, history: Optional[Sequence[ChatTurn]] = None) -> str:
     """What to search — usually just the question, sometimes the pair.
 
@@ -3246,7 +3310,11 @@ def _select_findings(candidates, limit: int = MAX_FINDINGS):
     # lane without needing the raw lane output.
     web.sort(key=lambda c: min((getattr(c, "native_ranks", None) or {}).values(), default=999))
 
-    return (web + rest)[:limit]
+    # Every web page survives. Tavily already ranked them, and a 20-slot mix
+    # with social is how listicles that name creators never reached extraction.
+    # Social fills only what is left of the cap.
+    leftover = max(0, limit - len(web))
+    return web + rest[:leftover]
 
 
 def _candidate_to_finding(candidate) -> WebFinding:
@@ -3383,19 +3451,74 @@ _PLAN_CONTEXT = {
         "    BAD:  'Nigeria creators popular influencers'"
         + _CREATOR_QUERY_RULES
     ),
+    "creators_tagged": (
+        "The operator named the hashtags to hunt, and usually the platform "
+        "and market. WEB SEARCH IS THE MAIN ANSWER. Emit 4-5 subqueries, "
+        "each a different web query: the tags themselves, the niche + market "
+        "+ platform, 'best accounts' / listicles / directories. Every "
+        "subquery must include grounding. Do not collapse this to two "
+        "factual queries.\n\n"
+        "Paid social lanes run because they named the platform — do not "
+        "replace the web searches with a hashtag scrape. The scrape adds "
+        "handles; the pages name who matters.\n\n"
+        "  topic: 'Find cooking creators in France on Instagram using "
+        "#exampletag and #othertag'\n"
+        "    GOOD: 'France Instagram cooking creators'\n"
+        "    GOOD: 'exampletag France Instagram accounts'\n"
+        "    GOOD: 'othertag France Instagram creators'\n"
+        "    GOOD: 'best France cooking influencers Instagram'\n"
+        + _CREATOR_QUERY_RULES
+    ),
 }
 
 
-def _plan_context_for(answer: str, text: str) -> str:
+def _plan_context_for(
+    answer: str, text: str, hashtags: Optional[Sequence[str]] = None,
+) -> str:
     """Planning guidance for this turn.
 
     A creator question that names no platform gets the balance rule: without
     it the retrieved pages pick the platform, and whichever one has recent
     award coverage becomes "the answer".
     """
+    tagged = bool(hashtags) or bool(re.search(r"#\w", text or ""))
+    if answer == "creators" and tagged:
+        return _PLAN_CONTEXT["creators_tagged"]
     if answer == "creators" and not platforms_named(text or ""):
         return _PLAN_CONTEXT["creators_no_platform"]
     return _PLAN_CONTEXT.get(answer, "")
+
+
+def _fan_out_web_plan(plan, topic: str, tags: Sequence[str], lanes: Sequence[str]):
+    """Extra Tavily-only queries, one per tag they typed.
+
+    The planner treats a hashtag hunt as factual and emits two subqueries.
+    That is not enough web. These extras do not open paid lanes — Instagram
+    already runs on the main plan when they named it.
+    """
+    from app.services.research.engine.schema import SubQuery
+
+    tags = [t.lstrip("#").strip() for t in tags if t and t.lstrip("#").strip()]
+    if not tags:
+        return plan
+    where = " ".join(lanes) or ""
+    seen = {sq.search_query.strip().lower() for sq in plan.subqueries}
+    extras = []
+    for tag in tags[:6]:
+        query = " ".join(p for p in (tag, "creators", where, topic) if p).strip()
+        if query.lower() in seen:
+            continue
+        extras.append(SubQuery(
+            label=f"web-tag:{tag}",
+            search_query=query,
+            ranking_query=f"creators posting #{tag}",
+            sources=["grounding"],
+            weight=1.0,
+        ))
+        seen.add(query.lower())
+    if extras:
+        plan.subqueries = list(plan.subqueries) + extras
+    return plan
 
 
 SEED_TAG_SYSTEM = """You are shown the hashtags an account posts under, and the request somebody made. Say which of those tags are worth searching to find OTHER accounts like this one.
@@ -3606,7 +3729,7 @@ def _research_via_engine(
             # articles about the niche rather than pages that compare
             # countries, and then there is nothing for the market extractor
             # to find.
-            context=_plan_context_for(answer, query.text),
+            context=_plan_context_for(answer, query.text, typed_hashtags),
             answer=answer,
         )
         targets = orchestrator.resolve_targets(
@@ -3632,6 +3755,11 @@ def _research_via_engine(
         # so "on the gram" stopped the question being asked and then left
         # Instagram shut anyway — the worst of both.
         lanes = _spend_lanes(prompt, query.text, platform)
+        plan = _fan_out_web_plan(
+            plan, query.text,
+            typed_tags or re.findall(r"#(\w+)", query.text or ""),
+            lanes,
+        )
         seed_note = None
         # Not the ones they asked NOT to be like. @_zinatubako was swept for
         # hashtags on a turn that said "but not like @_zinatubako", and its
@@ -3683,10 +3811,16 @@ def _research_via_engine(
             detail="Searching " + ", ".join(sorted(planned)),
         )
 
+        engine_cfg = _engine_config(settings)
+        if typed_tags:
+            engine_cfg = {
+                **engine_cfg,
+                "TAVILY_TIMEOUT": max(float(engine_cfg.get("TAVILY_TIMEOUT") or 15.0), 30.0),
+            }
         result = orchestrator.run_research(
             topic=query.text,
             plan=plan,
-            config=_engine_config(settings),
+            config=engine_cfg,
             provider=client,
             model=model,
             # The days THEY asked for. This was the config default, always,
@@ -3891,6 +4025,7 @@ def gather_web_context(
 
     # Never ask for something the operator has already written.
     routed = _unblock_a_complete_request(routed, _search_text(prompt, history), ctx)
+    routed = _unmerge_a_new_person(routed, prompt, history, ctx)
     action = routed["action"]
     if action == "ask":
         logger.info("web grounding: asking before searching — %s", routed["question"])
@@ -4006,7 +4141,7 @@ def gather_web_context(
             logger.info("web grounding: %r are seeds, not the answer — searching for others", seeds)
 
     # Named people already on screen: look those names up instead of starting
-    # a new hunt that throws the list away. A NEW name — "who is Ernest Obeng?"
+    # a new hunt that throws the list away. A NEW name — "who is Jane Doe?"
     # after a scrape plan for @isaac — is a search. There is no list to walk.
     shown = _creators_shown(history)
     if subjects and _subjects_already_shown(subjects, shown):
