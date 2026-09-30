@@ -1682,6 +1682,68 @@ def test_a_standalone_question_is_still_searched_verbatim():
 
     assert "copy it VERBATIM" in TRIAGE_SYSTEM
     assert "Do not paraphrase" in TRIAGE_SYSTEM
+    assert "A NEW PERSON IS NOT A NARROWING" in TRIAGE_SYSTEM
+    assert '"who is Jane Doe?"' in TRIAGE_SYSTEM
+
+
+def test_who_is_a_new_name_is_not_the_last_hunt():
+    """After a list, 'who is Jane Doe?' is Jane Doe, not the last niche."""
+    from app.services.grounding import _unmerge_a_new_person
+
+    history = [_shown(Creator(name="Alex Smith", handle="alexsmith"))]
+    routed = {
+        "action": "search",
+        "topic": "Jane Doe cooking creator",
+        "answer": "creators",
+        "subjects": ["Jane Doe"],
+        "hashtags": ["exampletag", "othertag"],
+        "platform": "instagram",
+        "country": "FR",
+    }
+    out = _unmerge_a_new_person(routed, "who is Jane Doe?", history, _ctx())
+    assert out["topic"] == "who is Jane Doe?"
+    assert out["hashtags"] == []
+    assert out["platform"] is None
+    assert out["country"] is None
+
+
+def test_what_about_a_name_still_merges_into_the_hunt():
+    from app.services.grounding import _unmerge_a_new_person
+
+    routed = {
+        "action": "search",
+        "topic": "Jane Doe France Instagram exampletag",
+        "subjects": ["Jane Doe"],
+        "hashtags": ["exampletag"],
+    }
+    out = _unmerge_a_new_person(routed, "what about Jane Doe", [], _ctx())
+    assert out["topic"] == "Jane Doe France Instagram exampletag"
+    assert out["hashtags"] == ["exampletag"]
+
+
+def test_who_is_jane_doe_searches_the_words_they_typed():
+    captured = {}
+    client = _triage(
+        '{"action":"search","topic":"Jane Doe cooking creator",'
+        '"answer":"creators","subjects":["Jane Doe"],'
+        '"hashtags":["exampletag"],"platform":"instagram","country":"FR"}'
+    )
+    history = [_shown(Creator(name="Alex Smith", handle="alexsmith"))]
+
+    def _search(q):
+        captured["text"] = q.text
+        return _results(2)
+
+    with patch("app.services.grounding.OpenAI", return_value=client), \
+         patch("app.services.grounding.provider_from_settings",
+               return_value=SimpleNamespace(name="tavily", search=_search)), \
+         patch("app.services.grounding.extract_creators", return_value=([], [])), \
+         patch("app.services.grounding._write_answer", return_value=(None, None)):
+        gather_web_context(
+            "who is Jane Doe?", _ctx(), history, settings=_settings(),
+        )
+
+    assert captured["text"] == "who is Jane Doe?"
 
 
 def test_the_routed_topic_is_what_gets_searched():
@@ -2085,6 +2147,71 @@ def test_social_still_competes_for_what_is_left():
     # three web results, and social fills every remaining slot
     assert len(picked) == MAX_FINDINGS
     assert [c._item.source for c in picked].count("grounding") == 3
+
+
+def test_every_web_result_survives_the_finding_cap():
+    """A hashtag hunt can return more than 20 Tavily pages. Cutting them
+    at MAX_FINDINGS is how the directories that name creators never got
+    extracted."""
+    from types import SimpleNamespace
+    from app.services.grounding import _select_findings, MAX_FINDINGS
+
+    def cand(source, i):
+        return SimpleNamespace(
+            _item=SimpleNamespace(source=source, author="a", url=f"{source}{i}",
+                                  title="t", snippet="", body="b", engagement={}),
+            native_ranks={f"q:{source}": i + 1},
+        )
+    candidates = [cand("grounding", i) for i in range(25)] + \
+                 [cand("instagram", i) for i in range(40)]
+
+    with patch("app.services.research.engine.schema.candidate_primary_item",
+               side_effect=lambda c: c._item):
+        picked = _select_findings(candidates)
+
+    sources = [c._item.source for c in picked]
+    assert sources.count("grounding") == 25
+    assert "instagram" not in sources
+    assert len(picked) == 25
+    assert len(picked) > MAX_FINDINGS
+
+
+def test_a_tagged_creator_hunt_plans_for_more_web():
+    from app.services.grounding import _plan_context_for
+
+    text = ("Find cooking creators in France on Instagram "
+            "using #exampletag and #othertag.")
+    ctx = _plan_context_for("creators", text)
+    assert "WEB SEARCH IS THE MAIN ANSWER" in ctx
+    assert "COVER BOTH" not in ctx
+    assert _plan_context_for("creators", text, ["exampletag"]) == ctx
+
+
+def test_each_typed_tag_gets_its_own_web_search():
+    from types import SimpleNamespace
+    from app.services.grounding import _fan_out_web_plan
+
+    plan = SimpleNamespace(subqueries=[
+        SimpleNamespace(label="q1", search_query="UK skincare Instagram",
+                        sources=["grounding"]),
+    ])
+    out = _fan_out_web_plan(plan, "skincare UK Instagram",
+                            ["cleanbeauty", "skinimalism"], ["instagram"])
+    labels = [sq.label for sq in out.subqueries]
+    assert labels.count("web-tag:cleanbeauty") == 1
+    assert labels.count("web-tag:skinimalism") == 1
+    extras = [sq for sq in out.subqueries if str(sq.label).startswith("web-tag:")]
+    assert all(sq.sources == ["grounding"] for sq in extras)
+
+
+def test_web_tag_expansions_do_not_open_paid_lanes():
+    from types import SimpleNamespace
+    from app.services.research.orchestrator import sources_for_subquery
+
+    extra = SimpleNamespace(label="web-tag:cleanbeauty", sources=["grounding"])
+    assert sources_for_subquery(extra, ["instagram"]) == ["grounding"]
+    main = SimpleNamespace(label="q1", sources=["grounding"])
+    assert "instagram" in sources_for_subquery(main, ["instagram"])
 
 
 def test_a_list_of_people_is_a_creator_question_however_it_is_phrased():

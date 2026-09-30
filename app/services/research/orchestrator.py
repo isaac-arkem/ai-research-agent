@@ -266,6 +266,23 @@ def paid_lane_allowed(source: str, named_platforms) -> bool:
     return source in {str(p).strip().lower() for p in (named_platforms or ())}
 
 
+def sources_for_subquery(subquery, named_platforms) -> List[str]:
+    """Lanes this subquery actually runs.
+
+    A named paid platform is still added when the planner forgot it — except
+    on web-only expansions (`web-tag:…`). Those exist to search Tavily more,
+    and attaching Instagram to each of them re-billed Apify for the same tags.
+    """
+    sources = list(subquery.sources)
+    if str(getattr(subquery, "label", "") or "").startswith("web-tag:"):
+        return sources
+    named = [str(p).strip().lower() for p in (named_platforms or ()) if p in LANES]
+    for platform in named:
+        if platform not in sources:
+            sources.append(platform)
+    return sources
+
+
 def plan_for(
     topic: str,
     *,
@@ -541,10 +558,9 @@ def run_research(
     named = [str(p).strip().lower() for p in (force_lanes or []) if p in LANES]
     for subquery in plan.subqueries:
         # A named platform the planner left out of this subquery still has to
-        # be asked — the operator said it explicitly.
-        for source in list(subquery.sources) + [
-            p for p in named if p not in subquery.sources
-        ]:
+        # be asked — the operator said it explicitly. Web-only tag expansions
+        # stay web-only; see sources_for_subquery.
+        for source in sources_for_subquery(subquery, named):
             # A question about ONE named person is not a hashtag sweep. The
             # paid lanes search a tag and return whoever posted under it,
             # which for "what are Sarkodie's handles" is fan pages, blogs and
