@@ -162,6 +162,7 @@ def _lane_instagram(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict)
         ig_creators=opts.get("ig_creators"),
         apify_token=cfg.get("APIFY_API_TOKEN"),
         hashtags=hashtags,
+        country_name=opts.get("country_name"),
     )
     return instagram.parse_instagram_response(result)
 
