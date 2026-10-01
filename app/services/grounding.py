@@ -469,9 +469,17 @@ class WebContext:
     provider: Optional[str] = None
     question: Optional[str] = None
     missing: List[str] = field(default_factory=list)
+    # What the message was, when a confident typed decision said so:
+    # continues_research | new_question | about_results | chitchat. None when
+    # no decision steered this turn.
+    message_kind: Optional[str] = None
     # The operator's filters as applied to this answer. Stored with it, so
     # the next message's reading starts from them (app/services/filters.py).
     filters: dict = field(default_factory=dict)
+    # The comparison this answer was for — which accounts, compared how —
+    # stored with it so a follow-up about the same accounts is not asked
+    # "similar in which way?" again.
+    comparison: dict = field(default_factory=dict)
     search_ms: Optional[int] = None
     triage_ms: Optional[int] = None
     reason: Optional[str] = None
@@ -4179,41 +4187,57 @@ def _noop(*_args, **_kwargs) -> None:
     pass
 
 
-def _shadow_decisions(prompt: str, history, routed: dict, settings) -> None:
-    """Ask the typed decisions beside the router and log both answers.
+def _ask_message_kind(prompt: str, history, settings):
+    """Start the "what is this message?" decision; the router runs meanwhile.
 
-    Shadow mode: nothing here changes what the turn does. It runs on a
-    background thread so the operator never waits on it, and every failure is
-    swallowed — it is a measurement, not a dependency. The log line pairs the
-    decision with what the router said, so the two can be compared on real
-    conversations before a decision is ever allowed to steer one.
+    None when decisions are off or there is no OpenRouter key.
     """
-    if not getattr(settings, "decision_shadow_enabled", False):
-        return
-    if not getattr(settings, "openrouter_api_key", None):
-        return
-    said = {k: routed.get(k) for k in ("action", "answer", "topic", "subjects", "reference_accounts")}
+    if not (getattr(settings, "decision_shadow_enabled", False)
+            or getattr(settings, "decision_steer_enabled", False)):
+        return None
+    from app.services.decisions import _endpoint, message_kind
 
-    def run() -> None:
-        try:
-            from app.services.decisions import message_kind
+    model = getattr(settings, "decision_model", "gpt-4o-mini")
+    if not _endpoint(model, settings)[0]:
+        return None
+    from concurrent.futures import ThreadPoolExecutor
 
-            decision = message_kind(prompt, history, settings=settings)
-            logger.info("decision shadow: %s", json.dumps({
-                "message": prompt[:200],
-                "message_kind": decision.choice,
-                "confidence": None if decision.confidence is None else round(decision.confidence, 3),
-                "probabilities": {k: round(v, 3) for k, v in decision.probabilities.items()},
-                "error": decision.error,
-                "latency_ms": decision.latency_ms,
-                "router": said,
-            }, ensure_ascii=False))
-        except Exception as exc:  # a measurement must never break a turn
-            logger.warning("decision shadow failed: %s", exc)
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="decision")
+    job = pool.submit(message_kind, prompt, history, settings=settings)
+    pool.shutdown(wait=False)
+    return job
 
-    import threading
 
-    threading.Thread(target=run, name="decision-shadow", daemon=True).start()
+def _message_kind_from(job, routed: dict, prompt: str, settings) -> Optional[str]:
+    """The decision, when it may steer: confident, and steering switched on.
+
+    Logged beside the router's reading every time, steering or not. None
+    means the turn runs exactly as it did before decisions existed.
+    """
+    if job is None:
+        return None
+    try:
+        decision = job.result(timeout=15)
+    except Exception as exc:
+        logger.warning("decision unavailable, routing alone: %s", exc)
+        return None
+    floor = float(getattr(settings, "decision_min_confidence", 0.85))
+    steers = bool(
+        getattr(settings, "decision_steer_enabled", False)
+        and decision.choice
+        and decision.confidence is not None
+        and decision.confidence >= floor
+    )
+    logger.info("decision: %s", json.dumps({
+        "message": prompt[:200],
+        "message_kind": decision.choice,
+        "confidence": None if decision.confidence is None else round(decision.confidence, 3),
+        "steers": steers,
+        "error": decision.error,
+        "latency_ms": decision.latency_ms,
+        "router": {k: routed.get(k) for k in ("action", "subjects", "reference_accounts", "topic")},
+    }, ensure_ascii=False))
+    return decision.choice if steers else None
 
 
 def _read_filters_meanwhile(prompt: str, history, routed: dict, settings):
@@ -4250,6 +4274,26 @@ def _read_filters_meanwhile(prompt: str, history, routed: dict, settings):
     future = pool.submit(run)
     pool.shutdown(wait=False)
     return future
+
+
+def _same_accounts(a, b) -> bool:
+    norm = lambda hs: {str(h).lstrip("@").strip().casefold() for h in (hs or []) if str(h).strip()}
+    return bool(norm(a)) and norm(a) == norm(b)
+
+
+def _comparison_in_force(history) -> Optional[dict]:
+    """The latest comparison stored with an answer: accounts and basis."""
+    for turn in reversed(list(history or [])):
+        if _role_of_turn(turn) != "assistant":
+            continue
+        try:
+            stored = json.loads(_content_of_turn(turn))
+        except ValueError:
+            continue
+        found = stored.get("comparison") if isinstance(stored, dict) else None
+        if isinstance(found, dict) and found.get("seeds") and found.get("basis"):
+            return found
+    return None
 
 
 def _filters_last_applied(history) -> Optional[dict]:
@@ -4335,6 +4379,7 @@ def gather_web_context(
         return WebContext(action="skip", reason="no search api key")
 
     emit("thinking", detail="Working out what to search for")
+    _kind_job = _ask_message_kind(prompt, history, settings)
     try:
         started = time.perf_counter()
         routed = triage_search(
@@ -4354,7 +4399,8 @@ def gather_web_context(
     # Never ask for something the operator has already written.
     routed = _unblock_a_complete_request(routed, _search_text(prompt, history), ctx)
     routed = _unmerge_a_new_person(routed, prompt, history, ctx)
-    _shadow_decisions(prompt, history, routed, settings)
+    _kind = _message_kind_from(_kind_job, routed, prompt, settings)
+    _is_new_question = _kind == "new_question"
     _filters_job = _read_filters_meanwhile(prompt, history, routed, settings)
     action = routed["action"]
     if action == "ask":
@@ -4394,9 +4440,17 @@ def gather_web_context(
             triage_ms=triage_ms,
             provider="thread",
         )
+    # Nothing to research, said with confidence: no search and no plan, even
+    # if the router wanted one. "nope" to "should I look for more creators
+    # like Sarkodie?" was routed as a search for "who is Sarkodie?" and the
+    # same answer came back again.
+    if _kind == "chitchat" and action in ("search", "plan"):
+        logger.info("web grounding: %r is chitchat — not %s", prompt[:60], action)
+        action = "skip"
     if action in ("plan", "skip"):
         logger.info("web grounding: action=%s (%s)", action, routed.get("reason", ""))
-        return WebContext(action=action, reason=routed.get("reason"), triage_ms=triage_ms)
+        return WebContext(action=action, reason=routed.get("reason"), triage_ms=triage_ms,
+                          message_kind=_kind)
 
     market = _market_for(ctx, routed.get("country"))
     answer = routed.get("answer") or "overview"
@@ -4457,7 +4511,12 @@ def gather_web_context(
         _referenced
         or accounts_are_references(prompt)
         or (_topic and accounts_are_references(_topic))
-        or any(accounts_are_references(t) for t in _earlier)
+        # A new question does not inherit a comparison made earlier in the
+        # thread: "who is sarkodie?" after "creators similar to @khaby.lame"
+        # made Sarkodie the account to be like. The words of THIS message,
+        # and the router's reading of it, still count.
+        or (not _is_new_question
+            and any(accounts_are_references(t) for t in _earlier))
     ):
         seen_seed = set()
         seeds = []
@@ -4558,7 +4617,24 @@ def gather_web_context(
     #
     # A new handle reopens it. "no, @thisone" has changed the subject, and
     # the basis for a different person is a different question.
-    if seeds and (not _basis_already_asked(history) or extract_handles(prompt)):
+    # The comparison in force. On the turn that answers "similar in which
+    # way?" the message IS the choice. On a later turn about the SAME
+    # accounts that is not a new question, the choice made then still holds:
+    # "yes search tiktok for more creators like him", after "same humor
+    # style" had been picked for @khaby.lame, was asked the question again.
+    _comparison: Optional[dict] = None
+    _carried_basis = False
+    if seeds and not _is_new_question:
+        if _basis_already_asked(history) and not extract_handles(prompt):
+            _comparison = {"seeds": [str(s).lstrip("@") for s in seeds], "basis": prompt.strip()[:120]}
+        else:
+            _prior = _comparison_in_force(history)
+            if _prior and _same_accounts(_prior.get("seeds"), seeds):
+                _comparison, _carried_basis = _prior, True
+                logger.info("web grounding: comparison %s still holds for %s", _prior.get("basis"), seeds)
+
+    if seeds and (not _basis_already_asked(history) or extract_handles(prompt)
+                  or _is_new_question):
         # Which platform, before which basis.
         #
         # Nothing here is being scraped yet, so this is NOT the question that
@@ -4624,7 +4700,8 @@ def gather_web_context(
         # given that — it returned nothing, so no options were offered and the
         # search ran unasked. The topic carries the whole request.
         standalone = (routed.get("topic") or "").strip() or prompt
-        bases = _bases_worth_offering(standalone, seeds=seeds, settings=settings)
+        bases = ([] if _carried_basis
+                 else _bases_worth_offering(standalone, seeds=seeds, settings=settings))
         if bases:
             # State the resolution, do not ask it. Genuine ambiguity is rare —
             # searching a name returns the prominent one and little else — so
@@ -4662,6 +4739,14 @@ def gather_web_context(
     # typed searched Ghana's GDP and returned mining reports; the router now
     # turns it into "dark skinned influencers in Ghana and Senegal" by reading
     # the conversation it can see and we cannot.
+    # Only for a basis carried from an earlier answer: on the turn that picks
+    # it, the router already writes it into the topic ("...with the same humor
+    # style on TikTok"), and appending the raw reply there would add nothing
+    # but the risk of appending a message that was not a pick at all.
+    if _carried_basis and _comparison and _comparison.get("basis"):
+        _t = (routed.get("topic") or "").strip()
+        if _t and _comparison["basis"].casefold() not in _t.casefold():
+            routed["topic"] = f"{_t}, compared on: {_comparison['basis']}"
     asked = (routed.get("topic") or "").strip() or _search_text(prompt, history)
     emit(
         "searching",
@@ -4703,6 +4788,8 @@ def gather_web_context(
             filters_job=_filters_job,
         )
         if engine_context is not None:
+            if _comparison:
+                engine_context.comparison = dict(_comparison)
             return engine_context
         # None means the engine could not answer — no lane returned anything,
         # or it failed. Fall through to the web provider rather than give the
@@ -4768,6 +4855,7 @@ def gather_web_context(
     )
     # Trim only now that the extractor has read the full text.
     return WebContext(
+        comparison=dict(_comparison) if _comparison else {},
         action="search",
         query=query.text,
         findings=[_trim(f) for f in findings],

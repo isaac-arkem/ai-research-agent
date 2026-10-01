@@ -369,6 +369,9 @@ class AgentResult(BaseModel):
     # The operator's filters as applied to a search turn. Stored with the
     # turn, never shown; the next turn's filter reading starts from them.
     filters: Optional[dict] = None
+    # The comparison a search turn answered (accounts + basis). Stored with
+    # the turn, never shown; a follow-up about the same accounts reuses it.
+    comparison: Optional[dict] = None
     validation: Optional[ValidationResult] = None
     raw: Optional[str] = None
     error: Optional[str] = None

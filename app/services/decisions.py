@@ -41,6 +41,21 @@ logger = logging.getLogger(__name__)
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
+
+def _uses_openrouter(model: str) -> bool:
+    """OpenRouter is for Jev only. Every GPT model goes to OpenAI directly,
+    on the OpenAI key the rest of the app already uses."""
+    return "jev" in (model or "").lower()
+
+
+def _endpoint(model: str, settings) -> tuple:
+    """(api key, base url or None, model name as that endpoint knows it)."""
+    if _uses_openrouter(model):
+        return getattr(settings, "openrouter_api_key", None), OPENROUTER_BASE_URL, model
+    # OpenRouter's "openai/gpt-4o-mini" is OpenAI's "gpt-4o-mini".
+    name = model.split("/", 1)[1] if model.lower().startswith("openai/") else model
+    return getattr(settings, "openai_api_key", None), None, name
+
 # Letters are single tokens for every tokenizer worth using, which is what lets
 # the probability of an option be read straight off the first output token.
 _LETTERS = string.ascii_uppercase
@@ -82,10 +97,11 @@ def choose(
     caller acts on; the meaning is what the model reads. Include a fallback
     answer ("none of these", "unclear") whenever the real world may not fit.
     """
-    model = model or getattr(settings, "decision_model", "openai/gpt-4o-mini")
-    key = getattr(settings, "openrouter_api_key", None)
+    model = model or getattr(settings, "decision_model", "gpt-4o-mini")
+    key, base_url, api_model = _endpoint(model, settings)
     if not key:
-        return Decision(choice=None, model=model, error="no OPENROUTER_API_KEY")
+        return Decision(choice=None, model=model, error=(
+            "no OPENROUTER_API_KEY" if base_url else "no OPENAI_API_KEY"))
     answers = list(answers)
     if not 2 <= len(answers) <= len(_LETTERS):
         return Decision(choice=None, model=model, error=f"{len(answers)} answers")
@@ -100,9 +116,10 @@ def choose(
     )
     started = time.perf_counter()
     try:
-        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE_URL, timeout=timeout)
+        client = (OpenAI(api_key=key, base_url=base_url, timeout=timeout) if base_url
+                  else OpenAI(api_key=key, timeout=timeout))
         response = client.chat.completions.create(
-            model=model,
+            model=api_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": context},
@@ -116,6 +133,15 @@ def choose(
             max_tokens=int(getattr(settings, "decision_max_tokens", 256)),
             logprobs=True,
             top_logprobs=min(20, max(5, len(answers))),
+            # Jev Router forwards each request to a model of its choosing, and
+            # its default pick (gemini flash) returns no token probabilities —
+            # so every Jev decision came back with no confidence and could
+            # never steer. Asking OpenRouter to route only to providers that
+            # honour every parameter sent (logprobs included) fixes that.
+            # And a short think: given room, a model that reasons first spent
+            # all 256 tokens deliberating over "nope" and never answered.
+            **({"extra_body": {"provider": {"require_parameters": True},
+                               "reasoning": {"effort": "low"}}} if base_url else {}),
         )
     except Exception as exc:
         logger.warning("decision failed (%s): %s", model, exc)
@@ -129,7 +155,7 @@ def choose(
     text = found.group(1) if found else raw[:1]
     by_letter = dict(zip(letters, (label for label, _ in answers)))
 
-    probabilities = _letter_probabilities(choice_obj, letters)
+    probabilities = _letter_probabilities(choice_obj, letters, answer=text)
     if probabilities:
         best = max(probabilities, key=probabilities.get)
         return Decision(
@@ -146,13 +172,28 @@ def choose(
                     error=f"answer {text!r} is not one of the options")
 
 
-def _letter_probabilities(choice_obj, letters: str) -> Dict[str, float]:
-    """The first token's probability mass over the option letters, normalised."""
+def _letter_probabilities(choice_obj, letters: str, answer: str = "") -> Dict[str, float]:
+    """The answer token's probability mass over the option letters, normalised.
+
+    The answer token, not the first one. A model that thinks before answering
+    — the ones Jev routes to — writes "<|sep|>" or a few words and "</think>"
+    first, and the letter several tokens later; the first token's
+    probabilities are about that preamble, not the choice. For a model that
+    answers straight away the letter IS the first token, so this is the same.
+    """
     try:
-        first = choice_obj.logprobs.content[0]
-        candidates = list(first.top_logprobs or []) or [first]
+        tokens = list(choice_obj.logprobs.content or [])
     except Exception:
         return {}
+    if not tokens:
+        return {}
+    picked = tokens[0]
+    if answer:
+        for token in reversed(tokens):
+            if str(getattr(token, "token", "") or "").strip().upper() == answer:
+                picked = token
+                break
+    candidates = list(getattr(picked, "top_logprobs", None) or []) or [picked]
     mass: Dict[str, float] = {}
     for item in candidates:
         token = str(getattr(item, "token", "") or "").strip().upper()
@@ -184,7 +225,8 @@ MESSAGE_KINDS: List[Tuple[str, str]] = [
      "is about the results already on screen: filter, sort, explain or compare "
      "them, or get handles or details for people listed"),
     ("chitchat",
-     "a greeting, thanks or acknowledgement — nothing to research"),
+     "a greeting, thanks, acknowledgement, or a decline (\"no\", \"nope\", \"not now\", "
+     "\"no thanks\") — nothing to research"),
 ]
 
 

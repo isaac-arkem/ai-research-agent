@@ -1,5 +1,6 @@
 """Agent — sanitise, OpenAI Chat Completions, validate, classify flow."""
 
+import json
 import logging
 import re
 import time
@@ -90,6 +91,21 @@ def _fail(
     )
 
 
+def _last_open_question(history) -> Optional[dict]:
+    """Our last turn, if it was a question still waiting for an answer."""
+    for turn in reversed(list(history or [])):
+        if getattr(turn, "role", None) != "assistant":
+            continue
+        try:
+            stored = json.loads(getattr(turn, "content", "") or "")
+        except ValueError:
+            return None
+        if isinstance(stored, dict) and stored.get("missing_fields") and stored.get("clarifying_question"):
+            return stored
+        return None
+    return None
+
+
 def generate_research_plan(
     operator_prompt: str,
     ctx: AgentContext,
@@ -173,6 +189,24 @@ def generate_research_plan(
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
 
+        if web.action == "skip" and web.message_kind == "chitchat":
+            # "alright sure", "ok", "thanks" with nothing to search. These
+            # went on to the plan writer, which can only write plans: an empty
+            # reply, or "Validation failed: countries must be a non-empty
+            # array". If our last turn asked something, ask it again.
+            pending = _last_open_question(history)
+            return AgentResult(
+                ok=True,
+                plan=None,
+                understood_so_far=(
+                    "Okay — to carry on, I still need this:" if pending
+                    else "Okay. What would you like to look into next?"
+                ),
+                clarifying_question=(pending or {}).get("clarifying_question"),
+                missing_fields=(pending or {}).get("missing_fields") or [],
+                latency_ms=int((time.perf_counter() - started) * 1000),
+            )
+
         if web.action == "respond":
             # Answered from the conversation. No plan, no findings, no sources
             # — the answer IS the reply, and re-rendering the previous turn's
@@ -205,6 +239,7 @@ def generate_research_plan(
                 comparison_bases=web.comparison_bases,
                 searched_for=web.query,
                 filters=web.filters or None,
+                comparison=web.comparison or None,
                 awaiting_approval=True,
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )
