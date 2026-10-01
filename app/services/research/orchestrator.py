@@ -86,6 +86,12 @@ class ResearchResult:
     clusters: List[schema.Cluster] = field(default_factory=list)
     source_status: Dict[str, str] = field(default_factory=dict)
     lane_outcomes: List[LaneOutcome] = field(default_factory=list)
+    # Every post the paid lanes returned, before fusion cuts the pool to
+    # pool_limit. The pool ranks SOURCES for the reader; it was also the only
+    # place creators were taken from, so a run whose planner wrote more web
+    # queries lost most of what TikTok returned — 220 posts from 134 accounts
+    # scraped and paid for, 3 creators shown. Creators are read from here too.
+    social_items: List[schema.SourceItem] = field(default_factory=list)
 
     @property
     def usable(self) -> bool:
@@ -243,6 +249,14 @@ SOURCES_FOR_ANSWER = {
 
 # Lanes that cost money per call. Everything else is keyless or flat-rate.
 PAID_LANES = frozenset({"instagram", "tiktok"})
+
+# Paid lanes that can search a phrase as well as a hashtag. A second job on
+# one of these still finds something new with its own phrase; on the others a
+# second job could only repeat the first.
+PHRASE_SEARCH_LANES = frozenset({"tiktok"})
+
+# The per-request targeting every job on a lane would otherwise repeat.
+_TARGETING_KEYS = frozenset({"hashtags", "tiktok_hashtags", "tiktok_creators", "ig_creators"})
 
 
 def paid_lane_allowed(source: str, named_platforms) -> bool:
@@ -553,10 +567,15 @@ def run_research(
     streams: Dict[Tuple[str, str], List[schema.SourceItem]] = {}
     outcomes: List[LaneOutcome] = []
 
-    jobs: List[Tuple[str, schema.SubQuery]] = []
+    jobs: List[Tuple[str, schema.SubQuery, bool]] = []
     # The platforms the operator actually named. This is the whole scrape
     # policy: a paid lane runs when it is in here and not otherwise.
     named = [str(p).strip().lower() for p in (force_lanes or []) if p in LANES]
+    # Paid lanes already given a job this request. The targeting — hashtags,
+    # accounts to read — is the same for every subquery, so each extra job
+    # paid Apify again for the same results: one TikTok request ran the
+    # scraper twice on #modestfashion #saudifashion #modestwear #hijabstyle.
+    paid_started: set = set()
     for subquery in plan.subqueries:
         # A named platform the planner left out of this subquery still has to
         # be asked — the operator said it explicitly. Web-only tag expansions
@@ -588,7 +607,20 @@ def run_research(
                     "not scraped — no platform named in the request",
                 ))
                 continue
-            jobs.append((source, subquery))
+            phrases_only = False
+            if source in PAID_LANES and source in paid_started:
+                if source not in PHRASE_SEARCH_LANES:
+                    # Nothing left to ask that the first job did not: without
+                    # its hashtags the lane would glue a tag out of the topic.
+                    outcomes.append(LaneOutcome(
+                        source, "skipped", 0,
+                        "not scraped again — already scraped for this request",
+                    ))
+                    continue
+                phrases_only = True
+            if source in PAID_LANES:
+                paid_started.add(source)
+            jobs.append((source, subquery, phrases_only))
 
     # The router's topic, for lanes that want the question rather than a
     # keyword rewrite of it.
@@ -597,8 +629,14 @@ def run_research(
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = [
-            pool.submit(_run_lane, source, subquery, from_date, to_date, depth, config, lane_options)
-            for source, subquery in jobs
+            pool.submit(
+                _run_lane, source, subquery, from_date, to_date, depth, config,
+                # A later job on a paid lane searches its own phrases only;
+                # the hashtags and accounts went out with the first.
+                {k: v for k, v in lane_options.items() if k not in _TARGETING_KEYS}
+                if phrases_only else lane_options,
+            )
+            for source, subquery, phrases_only in jobs
         ]
         for future in as_completed(futures):
             source, subquery, raw_items, outcome = future.result()
@@ -645,6 +683,11 @@ def run_research(
         source_status=status,
         lane_outcomes=outcomes,
     )
+    result.social_items = [
+        item
+        for (_label, source), items in streams.items() if source in PAID_LANES
+        for item in items
+    ]
     if not streams:
         return result
 

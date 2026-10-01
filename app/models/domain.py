@@ -293,6 +293,9 @@ class Creator(BaseModel):
     # Where to look at the account itself before scraping it. Built from
     # handle + platform, so it only exists when the page gave us both.
     profile_url: Optional[str] = None
+    # The follower count the platform reported for this account, when it was
+    # scraped. None for a name read off a web page — size unknown, not zero.
+    followers: Optional[int] = None
 
 
 class MarketFinding(BaseModel):
@@ -363,6 +366,9 @@ class AgentResult(BaseModel):
     # Ways to define "similar", when the question asked for similarity
     # without saying what kind. Empty when the sources do not divide.
     comparison_bases: Optional[List[ComparisonBasis]] = None
+    # The operator's filters as applied to a search turn. Stored with the
+    # turn, never shown; the next turn's filter reading starts from them.
+    filters: Optional[dict] = None
     validation: Optional[ValidationResult] = None
     raw: Optional[str] = None
     error: Optional[str] = None

@@ -204,6 +204,7 @@ def generate_research_plan(
                 markets=web.markets,
                 comparison_bases=web.comparison_bases,
                 searched_for=web.query,
+                filters=web.filters or None,
                 awaiting_approval=True,
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )

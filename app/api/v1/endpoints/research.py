@@ -129,6 +129,9 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
                 stored["comparison_bases"] = [
                     b.model_dump() for b in result.comparison_bases
                 ]
+            if result.filters:
+                # Read back by the next turn's filter reading.
+                stored["filters"] = result.filters
             cq_json = json.dumps(stored, ensure_ascii=False)
             return conversation_service.store.add_assistant_message(
                 cid,

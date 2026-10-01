@@ -4493,3 +4493,161 @@ def test_a_greeting_may_be_short():
              ChatTurn(role="assistant", content="20 creators")],
             openai_key="sk-test",
         ) == (None, None)
+
+
+# ── creators come from every scraped post, not only the fused pool ───
+
+
+def test_a_scraped_post_outside_the_pool_still_names_its_author():
+    """Fusion cuts the candidate pool to 60 across every lane, and a run whose
+    planner wrote more web queries kept a handful of TikTok posts: 220 posts
+    from 134 accounts scraped on Oct 1, 3 creators shown."""
+    from app.services.grounding import creators_from_post_authors
+
+    in_pool = _candidate("in_pool", 5_000, 100)
+    outside = _candidate("outside_pool", 9_000, 300).source_items[0]   # a plain item
+    got = creators_from_post_authors([in_pool, outside])
+    assert {c.handle for c in got} == {"in_pool", "outside_pool"}
+
+
+def test_an_author_in_the_pool_and_outside_it_is_one_creator():
+    from app.services.grounding import creators_from_post_authors
+
+    pooled = _candidate("same", 5_000, 100)
+    again = _candidate("same", 5_000, 100).source_items[0]
+    assert [c.handle for c in creators_from_post_authors([pooled, again])] == ["same"]
+
+
+def test_engagement_ranking_reads_plain_posts_too():
+    from app.services.grounding import creators_from_post_authors
+
+    got = creators_from_post_authors([
+        _candidate("pooled", 1_000, 10, views=1_000),
+        _candidate("plain", 1_000, 300, views=1_000).source_items[0],
+    ], "engagement_rate")
+    assert [c.handle for c in got] == ["plain", "pooled"]
+
+
+def test_the_engine_keeps_every_paid_lane_post():
+    """run_research stores the paid lanes' posts before the pool is cut; web
+    pages are not creators and stay out."""
+    import inspect
+    from app.services.research import orchestrator
+
+    src = inspect.getsource(orchestrator.run_research)
+    assert "result.social_items" in src and "PAID_LANES" in src
+    assert orchestrator.ResearchResult(topic="t", window=("a", "b")).social_items == []
+
+
+# ── a paid lane scrapes its hashtags once per request ────────────────
+
+
+def _run_with_fake_lanes(subqueries, force_lanes, **targets):
+    """run_research with every lane faked; returns [(source, query, opts)]."""
+    from app.services.research import orchestrator
+
+    calls = []
+
+    def fake(source):
+        def lane(q, fd, td, depth, cfg, opts):
+            calls.append((source, q, dict(opts)))
+            return []
+        return lane
+
+    plan = SimpleNamespace(
+        subqueries=[SimpleNamespace(label=f"sq{i}", search_query=q, ranking_query=q, sources=srcs, weight=1.0)
+                    for i, (q, srcs) in enumerate(subqueries)],
+        source_weights={}, freshness_mode="balanced", raw_topic="t",
+    )
+    with patch.dict(orchestrator.LANES, {s: fake(s) for s in ("tiktok", "instagram", "grounding")}):
+        orchestrator.run_research(topic="t", plan=plan, config={}, force_lanes=force_lanes,
+                                  window=("2026-01-01", "2026-10-01"), **targets)
+    return calls
+
+
+def test_tiktok_sends_its_hashtags_once_and_later_jobs_search_their_own_phrases():
+    """One TikTok request ran the scraper twice on the same four hashtags —
+    paying twice for the same ~80 results."""
+    calls = _run_with_fake_lanes(
+        [("saudi modest fashion creators", ["tiktok", "grounding"]),
+         ("top modest fashion tiktok saudi", ["tiktok", "grounding"])],
+        ["tiktok"], hashtags=["modestfashion", "abaya"], tiktok_creators=["someone"],
+    )
+    tiktok = [c for c in calls if c[0] == "tiktok"]
+    assert len(tiktok) == 2
+    with_tags = [c for c in tiktok if c[2].get("hashtags")]
+    assert len(with_tags) == 1 and with_tags[0][2].get("tiktok_creators") == ["someone"]
+    without = [c for c in tiktok if not c[2].get("hashtags")]
+    assert len(without) == 1 and "tiktok_creators" not in without[0][2]
+    assert {c[1] for c in tiktok} == {"saudi modest fashion creators", "top modest fashion tiktok saudi"}
+
+
+def test_instagram_is_scraped_once_per_request():
+    """Without its hashtags a second Instagram job would glue a tag out of the
+    topic; it is skipped and says so."""
+    calls = _run_with_fake_lanes(
+        [("a", ["instagram"]), ("b", ["instagram"]), ("c", ["instagram"])],
+        ["instagram"], hashtags=["modestfashion"],
+    )
+    assert [c[0] for c in calls if c[0] == "instagram"] == ["instagram"]
+
+
+def test_free_lanes_still_run_for_every_subquery():
+    calls = _run_with_fake_lanes([("a", ["grounding"]), ("b", ["grounding"])], [])
+    assert [c[1] for c in calls if c[0] == "grounding"].__len__() == 2
+
+
+# ── a namesake is searched for, not looked up as the one on screen ───
+
+
+def _isaac_turn(prompt, same):
+    """A follow-up naming "Isaac Kusi" while the Krismark CEO is on screen."""
+    import json as _json
+    from app.models.domain import ChatTurn
+
+    history = [
+        ChatTurn(role="user", content="who is Isaac Kusi?"),
+        ChatTurn(role="assistant", content=_json.dumps({
+            "clarifying_question": "x", "missing_fields": [],
+            "creators": [{"name": "Isaac Kusi", "why": "founder and CEO of Krismark"}],
+        })),
+    ]
+    client = _triage('{"action":"search","topic":"Isaac Kusi software developer KNUST",'
+                     '"answer":"overview","subjects":["Isaac Kusi"]}')
+    with patch("app.services.grounding.OpenAI", return_value=client), \
+         patch("app.services.grounding._means_someone_on_screen", return_value=same) as check, \
+         patch("app.services.grounding._lookup_subjects", return_value=[]) as lookup, \
+         patch("app.services.grounding.provider_from_settings"), \
+         patch("app.services.grounding._research_via_engine", return_value=None) as engine:
+        gather_web_context(prompt, _ctx(), history, settings=_settings(research_engine_enabled=True))
+    return check, lookup, engine
+
+
+def test_a_namesake_gets_the_search_the_router_wrote():
+    """"the isaac kusi i am looking for is a software developer" looked the
+    Krismark CEO up again — one source, the same man — and the router's
+    "Isaac Kusi software developer KNUST" never ran."""
+    check, lookup, engine = _isaac_turn("isaac kusi who completed KNUST", same=False)
+    assert check.called and not lookup.called
+    assert engine.call_args.kwargs["prompt"] == "Isaac Kusi software developer KNUST"
+
+
+def test_the_person_on_screen_is_still_looked_up():
+    check, lookup, engine = _isaac_turn("get me his instagram and tiktok", same=True)
+    assert lookup.called
+
+
+def test_the_same_person_check_falls_back_to_the_old_behaviour():
+    """A failed check says "same", which is exactly what happened before it."""
+    from app.models.domain import Creator
+    from app.services.grounding import _means_someone_on_screen
+
+    shown = [Creator(name="Isaac Kusi", why="CEO of Krismark")]
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("down")):
+        assert _means_someone_on_screen("the developer one", ["Isaac Kusi"], shown,
+                                        settings=_settings()) is True
+    with patch("app.services.grounding.OpenAI", return_value=_triage('{"same": false}')):
+        assert _means_someone_on_screen("the developer one", ["Isaac Kusi"], shown,
+                                        settings=_settings()) is False
+    with patch("app.services.grounding.OpenAI", return_value=_triage('{"oops": 1}')):
+        assert _means_someone_on_screen("x", ["Isaac Kusi"], shown, settings=_settings()) is True
