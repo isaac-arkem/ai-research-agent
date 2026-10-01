@@ -1787,6 +1787,7 @@ def propose_comparison_bases(
     openai_key: str,
     model: str = "gpt-4o-mini",
     timeout: float = 20.0,
+    already_set: str = "",
 ) -> List[ComparisonBasis]:
     """The ways "similar" could be meant, read off the accounts themselves.
 
@@ -1816,7 +1817,8 @@ def propose_comparison_bases(
             messages=[
                 {"role": "system", "content": COMPARISON_BASIS_SYSTEM},
                 {"role": "user",
-                 "content": f"The operator asked: {prompt}\n\nThe accounts they named: {who}"},
+                 "content": f"The operator asked: {prompt}\n\nThe accounts they named: {who}"
+                            + (f"\n\n{already_set}" if already_set else "")},
             ],
             temperature=0,
             response_format={"type": "json_object"},
@@ -2853,7 +2855,41 @@ def _basis_already_asked(history) -> bool:
     return False
 
 
-def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBasis]:
+def _already_set_for_bases(filters) -> str:
+    """The operator's filters, as what the basis options must not offer again.
+
+    "smaller UK artists under 100k" was answered with "similar size of
+    following" and "same country and scene" — both already decided in the
+    request. Empty when there are no filters, so a request without them is
+    proposed for exactly as before.
+    """
+    if filters is None:
+        return ""
+    lines = []
+    if getattr(filters, "countries", None):
+        lines.append(f"- Based in: {', '.join(filters.countries)} (ISO codes)")
+    if getattr(filters, "exclude_countries", None):
+        lines.append(f"- Not based in: {', '.join(filters.exclude_countries)} (ISO codes)")
+    low, high = getattr(filters, "min_followers", None), getattr(filters, "max_followers", None)
+    if low or high:
+        size = (f"between {low:,} and {high:,}" if low and high
+                else f"under {high:,}" if high else f"over {low:,}")
+        lines.append(f"- Follower count: {size}")
+    for requirement in getattr(filters, "requirements", None) or []:
+        lines.append(f"- {requirement}")
+    if not lines:
+        return ""
+    return (
+        "ALREADY SET BY THE OPERATOR — decided, not open:\n" + "\n".join(lines) + "\n"
+        "Never offer a way of comparing that one of these already settles: a country "
+        "settles \"same country\", \"same scene\", \"same region\"; a follower count "
+        "settles \"similar size\", \"similar fame\", \"similar popularity\", \"similar "
+        "follower count\"; a requirement settles whatever it states. Offer only what is "
+        "still open. If fewer than two real options remain, return an empty list."
+    )
+
+
+def _bases_worth_offering(prompt: str, *, seeds, settings, settled=None) -> List[ComparisonBasis]:
     """Offer a choice of basis only when the operator did not already make it.
 
     Three conditions, all of which have to hold. There must be seeds, or
@@ -2872,6 +2908,7 @@ def _bases_worth_offering(prompt: str, *, seeds, settings) -> List[ComparisonBas
             openai_key=settings.openai_api_key,
             model=settings.grounding_model,
             timeout=settings.search_timeout,
+            already_set=_already_set_for_bases(settled),
         )
     except Exception as exc:  # never break the turn over an optional extra
         _log_failure("web grounding: comparison bases failed: %s", exc, exc=exc)
@@ -4701,7 +4738,8 @@ def gather_web_context(
         # search ran unasked. The topic carries the whole request.
         standalone = (routed.get("topic") or "").strip() or prompt
         bases = ([] if _carried_basis
-                 else _bases_worth_offering(standalone, seeds=seeds, settings=settings))
+                 else _bases_worth_offering(standalone, seeds=seeds, settings=settings,
+                                            settled=_filters_from(_filters_job, timeout=20.0)))
         if bases:
             # State the resolution, do not ask it. Genuine ambiguity is rare —
             # searching a name returns the prominent one and little else — so
