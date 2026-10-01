@@ -11,7 +11,7 @@ ANSWERS = [("yes", "it is"), ("no", "it is not"), ("unclear", "cannot tell")]
 
 
 def _settings(**kw):
-    base = dict(openrouter_api_key="sk-or-test", decision_model="openai/gpt-4o-mini")
+    base = dict(openrouter_api_key="sk-or-test", openai_api_key="sk-test", decision_model="gpt-4o-mini")
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -57,16 +57,30 @@ def test_nothing_raises():
     with patch("app.services.decisions.OpenAI", side_effect=RuntimeError("down")):
         d = choose("Is it?", ANSWERS, "context", settings=_settings())
     assert d.choice is None and "down" in d.error
-    assert choose("Is it?", ANSWERS, "c", settings=_settings(openrouter_api_key=None)).error
+    assert choose("Is it?", ANSWERS, "c", settings=_settings(openai_api_key=None)).error
+    assert choose("Is it?", ANSWERS, "c", settings=_settings(openrouter_api_key=None,
+                                                             decision_model="typesafe/jev-router")).error
     assert choose("Is it?", ANSWERS[:1], "c", settings=_settings()).error
 
 
-def test_the_call_goes_to_openrouter_with_the_configured_model():
+def test_gpt_goes_to_openai_and_only_jev_goes_to_openrouter():
     client = _response("A", top=[("A", 1.0)])
     with patch("app.services.decisions.OpenAI", return_value=client) as made:
-        choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="google/gemini-x"))
+        choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="gpt-4o-mini"))
+    assert "base_url" not in made.call_args.kwargs
+    assert made.call_args.kwargs["api_key"] == "sk-test"
+    assert client.chat.completions.create.call_args.kwargs["model"] == "gpt-4o-mini"
+
+    with patch("app.services.decisions.OpenAI", return_value=client) as made:
+        choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="openai/gpt-4o-mini"))
+    assert "base_url" not in made.call_args.kwargs
+    assert client.chat.completions.create.call_args.kwargs["model"] == "gpt-4o-mini"
+
+    with patch("app.services.decisions.OpenAI", return_value=client) as made:
+        choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="typesafe/jev-router"))
     assert made.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
-    assert client.chat.completions.create.call_args.kwargs["model"] == "google/gemini-x"
+    assert made.call_args.kwargs["api_key"] == "sk-or-test"
+    assert client.chat.completions.create.call_args.kwargs["model"] == "typesafe/jev-router"
 
 
 def test_assistant_turns_are_read_as_sentences_not_payload():
@@ -88,23 +102,252 @@ def test_message_kind_offers_exactly_the_four_kinds():
         assert label in system
 
 
-def test_shadow_mode_is_off_without_a_key_and_never_blocks_the_turn():
+def test_the_decision_is_not_asked_without_a_key_or_when_switched_off():
     from app.services import grounding
 
-    with patch("threading.Thread") as thread:
-        grounding._shadow_decisions("hi", [], {}, _settings(openrouter_api_key=None,
-                                                             decision_shadow_enabled=True))
-        grounding._shadow_decisions("hi", [], {}, _settings(decision_shadow_enabled=False))
-    assert not thread.called
-    with patch("threading.Thread") as thread:
-        grounding._shadow_decisions("hi", [], {"action": "skip"}, _settings(decision_shadow_enabled=True))
-    assert thread.call_args.kwargs["daemon"] is True
-    thread.return_value.start.assert_called_once()
+    assert grounding._ask_message_kind("hi", [], _settings(openai_api_key=None,
+                                                          decision_shadow_enabled=True)) is None
+    assert grounding._ask_message_kind("hi", [], _settings(openrouter_api_key=None,
+                                                          decision_model="typesafe/jev-router",
+                                                          decision_shadow_enabled=True)) is None
+    assert grounding._ask_message_kind("hi", [], _settings(decision_shadow_enabled=False,
+                                                          decision_steer_enabled=False)) is None
 
 
-def test_a_model_that_writes_around_the_letter_is_still_read():
-    """Jev Router answers through a model that may wrap the letter."""
-    for said, want in (("B", "no"), ("**B**", "no"), ("Answer: C", "unclear"), (" a ", "yes")):
-        with patch("app.services.decisions.OpenAI", return_value=_response(said)):
-            d = choose("Is it?", ANSWERS, "context", settings=_settings())
-        assert d.choice == want, said
+# ── confident decisions steer; anything else changes nothing ─────────
+
+
+def _job(choice, confidence, error=None):
+    from concurrent.futures import Future
+    f = Future()
+    f.set_result(Decision(choice=choice, confidence=confidence, error=error))
+    return f
+
+
+def test_only_a_confident_decision_steers():
+    from app.services.grounding import _message_kind_from
+
+    on = _settings(decision_steer_enabled=True, decision_min_confidence=0.85)
+    assert _message_kind_from(_job("new_question", 0.97), {}, "x", on) == "new_question"
+    assert _message_kind_from(_job("new_question", 0.60), {}, "x", on) is None
+    assert _message_kind_from(_job("new_question", None), {}, "x", on) is None   # unknown confidence
+    assert _message_kind_from(_job(None, None, "down"), {}, "x", on) is None
+    off = _settings(decision_steer_enabled=False, decision_min_confidence=0.85)
+    assert _message_kind_from(_job("new_question", 0.99), {}, "x", off) is None
+    assert _message_kind_from(None, {}, "x", on) is None
+
+
+def _after_a_comparison(kind):
+    """"who is sarkodie?" after "creators similar to @khaby.lame on tiktok"."""
+    import json as _json
+    from app.models.domain import ChatTurn
+    from app.services import grounding
+    from tests.test_grounding import _ctx, _settings as g_settings, _triage
+
+    history = [ChatTurn(role="user", content="find creators similar to @khaby.lame on tiktok"),
+               ChatTurn(role="assistant", content=_json.dumps({"clarifying_question": "x", "missing_fields": []}))]
+    client = _triage('{"action":"search","topic":"Sarkodie","answer":"overview",'
+                     '"subjects":["Sarkodie"],"reference_accounts":[]}')
+    with patch("app.services.grounding.OpenAI", return_value=client), \
+         patch("app.services.grounding._ask_message_kind", return_value=None), \
+         patch("app.services.grounding._message_kind_from", return_value=kind), \
+         patch("app.services.grounding._bases_worth_offering", return_value=[]), \
+         patch("app.services.grounding.provider_from_settings"), \
+         patch("app.services.grounding._research_via_engine", return_value=None) as engine:
+        grounding.gather_web_context("who is sarkodie?", _ctx(), history,
+                                     settings=g_settings(research_engine_enabled=True))
+    return engine.call_args.kwargs
+
+
+def test_a_new_question_does_not_inherit_an_earlier_comparison():
+    kw = _after_a_comparison("new_question")
+    assert kw["seeds"] == [] and kw["subjects"] == ["Sarkodie"]
+
+
+def test_without_a_confident_decision_the_old_behaviour_stands():
+    kw = _after_a_comparison(None)
+    assert kw["seeds"] == ["Sarkodie"]          # unchanged: the earlier "similar" still counts
+
+
+def test_chitchat_with_nothing_to_search_gets_a_reply_and_our_question_again():
+    """"alright sure" reached the plan writer: an empty reply, or "Validation
+    failed: countries must be a non-empty array"."""
+    import json as _json
+    from app.models.domain import ChatTurn
+    from app.services import agent
+    from app.services.grounding import WebContext
+    from tests.test_grounding import _ctx, _settings as g_settings
+
+    pending = [ChatTurn(role="assistant", content=_json.dumps({
+        "clarifying_question": "Which platform should I look on?", "missing_fields": ["platform"]}))]
+    with patch("app.services.agent.gather_web_context",
+               return_value=WebContext(action="skip", message_kind="chitchat")), \
+         patch("app.services.agent.OpenAI") as planner:
+        res = agent.generate_research_plan("alright sure", _ctx(), openai_key="sk",
+                                           history=pending, settings=g_settings())
+        assert not planner.called
+        assert res.ok and res.clarifying_question == "Which platform should I look on?"
+        assert res.missing_fields == ["platform"]
+        res = agent.generate_research_plan("alright sure", _ctx(), openai_key="sk",
+                                           history=[], settings=g_settings())
+        assert res.ok and "What would you like to look into next?" in res.understood_so_far
+
+
+def test_a_skip_that_is_not_chitchat_still_goes_to_the_planner():
+    from app.services import agent
+    from app.services.grounding import WebContext
+    from tests.test_grounding import _ctx, _settings as g_settings
+
+    with patch("app.services.agent.gather_web_context", return_value=WebContext(action="skip")), \
+         patch("app.services.agent.OpenAI") as planner:
+        planner.return_value.chat.completions.create.side_effect = RuntimeError("planner reached")
+        res = agent.generate_research_plan("plan it", _ctx(), openai_key="sk", history=[], settings=g_settings())
+    assert planner.return_value.chat.completions.create.called and res.error_code == "openai_failed"
+
+
+def _response_tokens(text, tokens):
+    """A completion whose logprobs cover several tokens: [(token, [(alt, p)])]."""
+    content = [SimpleNamespace(token=t, logprob=0.0,
+                               top_logprobs=[SimpleNamespace(token=a, logprob=math.log(p)) for a, p in alts])
+               for t, alts in tokens]
+    choice = SimpleNamespace(message=SimpleNamespace(content=text), logprobs=SimpleNamespace(content=content))
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(choices=[choice])
+    return client
+
+
+def test_a_model_that_thinks_first_is_read_at_the_answer_letter():
+    """Jev's routes write "<|sep|>" or "</think>" before the letter."""
+    client = _response_tokens("B", [
+        ("<|sep|>", [("<|sep|>", 1.0)]),
+        (" single", [(" single", 0.8), (" only", 0.2)]),
+        ("</think>", [("</think>", 0.9)]),
+        ("B", [("B", 0.9), ("A", 0.1)]),
+        ("<|close|>", [("<|close|>", 1.0)]),
+    ])
+    with patch("app.services.decisions.OpenAI", return_value=client):
+        d = choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="typesafe/jev-router"))
+    assert d.choice == "no" and abs(d.confidence - 0.9) < 1e-9
+
+
+def test_jev_asks_openrouter_for_providers_that_return_probabilities_and_gpt_does_not():
+    client = _response("A", top=[("A", 1.0)])
+    with patch("app.services.decisions.OpenAI", return_value=client):
+        choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="typesafe/jev-router"))
+    assert client.chat.completions.create.call_args.kwargs["extra_body"] == {
+        "provider": {"require_parameters": True}, "reasoning": {"effort": "low"}}
+    with patch("app.services.decisions.OpenAI", return_value=client):
+        choose("Is it?", ANSWERS, "context", settings=_settings(decision_model="gpt-4o-mini"))
+    assert "extra_body" not in client.chat.completions.create.call_args.kwargs
+
+
+def test_a_confident_decline_is_not_searched_even_when_the_router_wants_to():
+    """"nope" to "should I look for more creators like Sarkodie?" was routed as
+    a search for "who is Sarkodie?" and the same answer came back."""
+    from app.services import grounding
+    from tests.test_grounding import _ctx, _settings as g_settings, _triage
+
+    client = _triage('{"action":"search","topic":"who is Sarkodie?","subjects":["Sarkodie"]}')
+    for kind, searched in (("chitchat", False), (None, True), ("continues_research", True)):
+        with patch("app.services.grounding.OpenAI", return_value=client), \
+             patch("app.services.grounding._ask_message_kind", return_value=None), \
+             patch("app.services.grounding._message_kind_from", return_value=kind), \
+             patch("app.services.grounding.provider_from_settings"), \
+             patch("app.services.grounding._research_via_engine", return_value=None) as engine:
+            web = grounding.gather_web_context("nope", _ctx(), [], settings=g_settings(research_engine_enabled=True))
+        assert engine.called is searched, kind
+        if kind == "chitchat":
+            assert web.action == "skip" and web.message_kind == "chitchat"
+
+
+# ── the comparison already chosen is remembered ──────────────────────
+
+
+def _khaby_thread(picked=True):
+    import json as _json
+    from app.models.domain import ChatTurn
+
+    turns = [ChatTurn(role="user", content="find creators similar to @khaby.lame on tiktok"),
+             ChatTurn(role="assistant", content=_json.dumps({
+                 "clarifying_question": "Similar in which way?", "missing_fields": ["basis"],
+                 "comparison_bases": [{"label": "same humor style"}]}))]
+    if picked:
+        turns += [ChatTurn(role="user", content="same humor style"),
+                  ChatTurn(role="assistant", content=_json.dumps({
+                      "clarifying_question": "Search TikTok for more?", "missing_fields": [],
+                      "comparison": {"seeds": ["khaby.lame"], "basis": "same humor style"}}))]
+    return turns
+
+
+def _turn(prompt, history, triage_json, kind=None):
+    from app.models.domain import ComparisonBasis
+    from app.services import grounding
+    from app.services.grounding import WebContext
+    from tests.test_grounding import _ctx, _settings as g_settings, _triage
+
+    with patch("app.services.grounding.OpenAI", return_value=_triage(triage_json)), \
+         patch("app.services.grounding._ask_message_kind", return_value=None), \
+         patch("app.services.grounding._message_kind_from", return_value=kind), \
+         patch("app.services.grounding._bases_worth_offering",
+               return_value=[ComparisonBasis(label="a"), ComparisonBasis(label="b")]) as proposer, \
+         patch("app.services.grounding.provider_from_settings"), \
+         patch("app.services.grounding._research_via_engine",
+               return_value=WebContext(action="search")) as engine:
+        web = grounding.gather_web_context(prompt, _ctx(), history,
+                                           settings=g_settings(research_engine_enabled=True))
+    return web, proposer, engine
+
+
+_KHABY = ('{"action":"search","topic":"creators similar to @khaby.lame on TikTok",'
+          '"answer":"creators","reference_accounts":["khaby.lame"],"platform":"tiktok"}')
+
+
+def test_the_pick_is_stored_with_the_answer():
+    web, proposer, engine = _turn("same humor style", _khaby_thread(picked=False), _KHABY, "continues_research")
+    assert not proposer.called
+    assert web.comparison == {"seeds": ["khaby.lame"], "basis": "same humor style"}
+    # The router already carries the pick in its topic; nothing is appended.
+    assert "compared on:" not in engine.call_args.kwargs["prompt"]
+
+
+def test_more_of_the_same_accounts_keeps_the_basis_already_chosen():
+    """"yes search tiktok for more creators like him" was asked "similar in
+    which way?" again, right after "same humor style" was picked."""
+    web, proposer, engine = _turn("yes search tiktok for more creators like him", _khaby_thread(), _KHABY,
+                                  "continues_research")
+    assert not proposer.called, "the question is not asked again"
+    assert engine.called and web.comparison["basis"] == "same humor style"
+    assert "compared on: same humor style" in engine.call_args.kwargs["prompt"]
+
+
+def test_different_accounts_are_asked_afresh():
+    web, proposer, engine = _turn(
+        "now find creators similar to @mrbeast on tiktok", _khaby_thread(),
+        '{"action":"search","topic":"creators similar to @mrbeast on TikTok","answer":"creators",'
+        '"reference_accounts":["mrbeast"],"platform":"tiktok"}', "new_question")
+    assert proposer.called and web.missing == ["basis"]
+
+
+def test_without_a_stored_comparison_it_asks_as_before():
+    """An older thread whose answers never stored a comparison: unchanged."""
+    import json as _json
+    from app.models.domain import ChatTurn
+
+    history = _khaby_thread()[:3] + [ChatTurn(role="assistant", content=_json.dumps({
+        "clarifying_question": "Search TikTok for more?", "missing_fields": []}))]
+    _, proposer, _ = _turn("yes search tiktok for more creators like him", history, _KHABY, "continues_research")
+    assert proposer.called
+
+
+def test_the_comparison_is_saved_with_the_turn():
+    import json
+    from app.api.v1.endpoints import research
+    from app.models.domain import AgentResult, WebFinding
+
+    saved = []
+    store = SimpleNamespace(add_assistant_message=lambda cid, uid, content, **k: saved.append(content) or "m")
+    with patch.object(research.conversation_service, "store", store):
+        research._persist_assistant("c", "u", AgentResult(
+            ok=True, clarifying_question="next?", findings=[WebFinding(title="t", url="https://x", snippet="s")],
+            comparison={"seeds": ["khaby.lame"], "basis": "same humor style"}))
+    assert json.loads(saved[0])["comparison"] == {"seeds": ["khaby.lame"], "basis": "same humor style"}

@@ -86,19 +86,27 @@ class Settings(BaseSettings):
 
     # ── Typed decisions ─────────────────────────────────────────────────
     # Small bounded judgements — one question, a fixed set of answers, a
-    # probability for each — made through OpenRouter (app/services/decisions.py).
+    # probability for each (app/services/decisions.py). GPT models go to
+    # OpenAI directly; OpenRouter is used for Jev only.
     # The router answers several such questions at once in free JSON; these
     # ask one at a time and say how sure they are.
     openrouter_api_key: Optional[str] = None
-    # Any OpenRouter model that returns token probabilities; without them a
-    # decision still comes back, with its confidence reported as unknown.
-    decision_model: str = "openai/gpt-4o-mini"
+    # gpt-4o-mini (OpenAI) returns token probabilities, so a decision comes
+    # with a confidence. "typesafe/jev-router" (Jev, via OpenRouter) returns
+    # none: its decisions are logged but never confident enough to steer.
+    decision_model: str = "gpt-4o-mini"
     # Output budget for a decision. The answer is one letter; the room is for
     # models that think before answering (Jev Router routes to one).
-    decision_max_tokens: int = 256
+    decision_max_tokens: int = 1024
     # Shadow mode: decisions run beside the router and are only logged. They
     # change nothing a conversation does until this is used for real.
     decision_shadow_enabled: bool = True
+    # Let confident decisions steer the turn (see _message_kind_from in
+    # grounding.py). Off returns them to logging only.
+    decision_steer_enabled: bool = True
+    # Below this probability a decision changes nothing and the turn runs as
+    # it did before decisions existed.
+    decision_min_confidence: float = 0.85
 
     # ── The operator's filters ──────────────────────────────────────────
     # Read out of the conversation as data by app/services/filters.py.

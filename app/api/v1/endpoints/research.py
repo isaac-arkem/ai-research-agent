@@ -132,6 +132,9 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
             if result.filters:
                 # Read back by the next turn's filter reading.
                 stored["filters"] = result.filters
+            if result.comparison:
+                # Read back so "more like him" keeps the basis already chosen.
+                stored["comparison"] = result.comparison
             cq_json = json.dumps(stored, ensure_ascii=False)
             return conversation_service.store.add_assistant_message(
                 cid,
