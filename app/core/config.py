@@ -84,6 +84,35 @@ class Settings(BaseSettings):
     # Set to "" to turn escalation off and take the small model's answer.
     grounding_escalation_model: str = "gpt-4o"
 
+    # ── Typed decisions ─────────────────────────────────────────────────
+    # Small bounded judgements — one question, a fixed set of answers, a
+    # probability for each — made through OpenRouter (app/services/decisions.py).
+    # The router answers several such questions at once in free JSON; these
+    # ask one at a time and say how sure they are.
+    openrouter_api_key: Optional[str] = None
+    # Any OpenRouter model that returns token probabilities; without them a
+    # decision still comes back, with its confidence reported as unknown.
+    decision_model: str = "openai/gpt-4o-mini"
+    # Output budget for a decision. The answer is one letter; the room is for
+    # models that think before answering (Jev Router routes to one).
+    decision_max_tokens: int = 256
+    # Shadow mode: decisions run beside the router and are only logged. They
+    # change nothing a conversation does until this is used for real.
+    decision_shadow_enabled: bool = True
+
+    # ── The operator's filters ──────────────────────────────────────────
+    # Read out of the conversation as data by app/services/filters.py.
+    # gpt-4o, not mini: measured on twelve real and multi-turn cases, mini
+    # filed "same music style" as a filter and repeated captured ones; gpt-4o
+    # read all twelve correctly. One call per routed message.
+    filters_model: str = "gpt-4o"
+    # Shadow mode: filters are read and logged beside the router's fields;
+    # nothing applies them yet.
+    filters_shadow_enabled: bool = True
+    # Apply the filters that can be checked against data (follower range,
+    # excluded accounts). Off falls back to the router's fields alone.
+    filters_apply_enabled: bool = True
+
     # ── Multi-source research engine ────────────────────────────────────
     # With this on, a search fans out across Reddit, Hacker News, Instagram,
     # TikTok and Polymarket as well as the web, and the engine decides which

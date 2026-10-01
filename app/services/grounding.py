@@ -469,6 +469,9 @@ class WebContext:
     provider: Optional[str] = None
     question: Optional[str] = None
     missing: List[str] = field(default_factory=list)
+    # The operator's filters as applied to this answer. Stored with it, so
+    # the next message's reading starts from them (app/services/filters.py).
+    filters: dict = field(default_factory=dict)
     search_ms: Optional[int] = None
     triage_ms: Optional[int] = None
     reason: Optional[str] = None
@@ -536,6 +539,64 @@ def _creators_shown(history: Optional[Sequence[ChatTurn]] = None) -> List[Creato
         if found:
             return found
     return []
+
+
+SAME_PERSON_SYSTEM = """The operator named someone who shares a name with a person already on screen. Decide which they mean.
+
+Return JSON: {"same": true|false}
+
+true  — they mean the person on screen: asking for their handles, accounts, details, or more about them.
+false — they mean a DIFFERENT person with the same name: they describe them in a way the person on screen does not fit (another job, school, company, country, field), or say the one shown is not who they meant.
+
+  on screen: "Isaac Kusi — founder and CEO of Krismark, shea butter lotions"
+  "the isaac kusi i am looking for is a software developer"   -> false
+  "isaac kusi who completed KNUST"                            -> false
+  "get me isaac kusi's instagram and tiktok"                  -> true
+  "tell me more about him"                                    -> true"""
+
+
+def _means_someone_on_screen(
+    prompt: str, subjects: Sequence[str], shown: Sequence[Creator], *, settings,
+) -> bool:
+    """Is a name on screen the person they mean, or a namesake?
+
+    "Isaac Kusi" was on screen as the CEO of Krismark. "The Isaac Kusi I am
+    looking for is a software developer", then "who completed KNUST", then
+    "connected to Arkem LLC" each matched that card by name, so each looked
+    the Krismark CEO up again — one source, the same man — and the search
+    the router had written ("Isaac Kusi software developer KNUST") never ran.
+
+    The model decides; on any failure this says "same", which is exactly the
+    behaviour before it existed.
+    """
+    named = [c for c in shown if _is_a_subject(c, subjects)]
+    if not named:
+        return True
+    listed = "\n".join(
+        f"- {c.name}" + (f" (@{c.handle})" if c.handle else "") + (f" — {c.why}" if c.why else "")
+        for c in named[:8]
+    )
+    try:
+        client = OpenAI(api_key=settings.openai_api_key,
+                        timeout=float(getattr(settings, "search_timeout", 15.0)))
+        response = client.chat.completions.create(
+            model=getattr(settings, "grounding_model", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": SAME_PERSON_SYSTEM},
+                {"role": "user", "content": f"On screen:\n{listed}\n\nThe operator said: {prompt}"},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        parsed = extract_json_object(response.choices[0].message.content or "") or {}
+    except Exception as exc:
+        _log_failure("web grounding: same-person check failed: %s", exc, exc=exc)
+        return True
+    same = parsed.get("same")
+    if same is False:
+        logger.info("web grounding: %s is not the one on screen — searching", list(subjects))
+        return False
+    return True
 
 
 def _roster_text(creators: Sequence[Creator]) -> str:
@@ -2949,6 +3010,89 @@ KEEP SMALL ACCOUNTS. Few followers is not irrelevance. Unless the operator asked
 JUDGE AGAINST THE QUESTION, NOT AGAINST QUALITY. You are not ranking. The only test is whether someone reading the question would say "that is not what I asked for"."""
 
 
+# Accounts per relevance call. See drop_irrelevant_creators.
+_RELEVANCE_BATCH = 30
+
+
+def _filters_to_check(filters, ctx: Optional[AgentContext]) -> str:
+    """The operator's judged filters, as a checklist for the relevance filter.
+
+    Empty when there are none, so a search without filters is judged exactly
+    as before. Countries and free-form requirements only: sizes and excluded
+    accounts are checked against data before this runs.
+
+    It used to see only the topic sentence, so "no brands or shops" never
+    reached it and six shops stayed in the list; and when a follow-up's topic
+    dropped "UK" or "not in Ghana", it never heard of them at all.
+    """
+    if filters is None:
+        return ""
+    names = {m.iso.upper(): m.name for m in (getattr(ctx, "markets", None) or [])}
+    said = lambda codes: ", ".join(names.get(c, c) for c in codes)
+    lines = []
+    if getattr(filters, "countries", None):
+        lines.append(f"- Must be based in: {said(filters.countries)}")
+    if getattr(filters, "exclude_countries", None):
+        lines.append(f"- Must NOT be based in: {said(filters.exclude_countries)}")
+    for requirement in getattr(filters, "requirements", None) or []:
+        lines.append(f"- {requirement}")
+    if not lines:
+        return ""
+    return (
+        "THE OPERATOR'S FILTERS — check every account against each one:\n"
+        + "\n".join(lines) + "\n\n"
+        "For each account and each filter:\n"
+        "- its line SHOWS it fails the filter -> put it in \"drop\", and say which filter in \"why\";\n"
+        "- it plainly passes -> keep it, say nothing;\n"
+        "- its line shows nothing either way -> keep it. For a REQUIREMENT, also put it in \"unverified\" "
+        "with the requirement you could not check. For a COUNTRY, say nothing: most accounts never state "
+        "where they are, and a label on every card tells the operator nothing.\n"
+        "Evidence of a country is anything in the line: a country suffix in the handle (.pk, _ng, .id, ksa), "
+        "a flag, a city or place name, the language or script of the caption, a currency or phone code.\n"
+        "Never drop on a guess: no evidence is not a failure.\n"
+        'Return JSON: {"drop": [{"n": <number>, "why": "<the filter it fails>"}], '
+        '"unverified": [{"n": <number>, "what": "<the filter, a few words>"}]}\n\n'
+    )
+
+
+def _label_unverified(creators: List[Creator], rows, *, requirements: Sequence[str] = ()) -> List[Creator]:
+    """Say on the card which of the operator's REQUIREMENTS could not be
+    checked for that creator.
+
+    Only requirements: a country label went on all 81 cards of a Saudi search,
+    because TikTok never says where anyone is — a label everywhere says
+    nothing. A note is kept only when it names one of the operator's own
+    requirements, in their words.
+    """
+    if not isinstance(rows, list) or not requirements:
+        return creators
+    wanted = [r.strip().lower() for r in requirements if r and r.strip()]
+
+    def theirs(what: str) -> Optional[str]:
+        low = what.lower()
+        for original, req in zip(requirements, wanted):
+            if req in low or low in req:
+                return original.strip()
+        return None
+
+    notes: dict = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("n"), int) and 1 <= row["n"] <= len(creators):
+            what = theirs(str(row.get("what") or "").strip())
+            if what and what not in notes.setdefault(row["n"] - 1, []):
+                notes[row["n"] - 1].append(what)
+    if not notes:
+        return creators
+    out = []
+    for i, creator in enumerate(creators):
+        if i in notes and "unverified:" not in (creator.why or ""):
+            note = "unverified: " + ", ".join(notes[i])
+            creator = creator.model_copy(update={
+                "why": f"{note} — {creator.why}" if creator.why else note})
+        out.append(creator)
+    return out
+
+
 def drop_irrelevant_creators(
     creators: List[Creator],
     question: str,
@@ -2957,6 +3101,8 @@ def drop_irrelevant_creators(
     model: str = "gpt-4o-mini",
     timeout: float = 20.0,
     seed_profile: str = "",
+    filters=None,
+    ctx: Optional[AgentContext] = None,
 ) -> List[Creator]:
     """Remove the ones that do not answer the question that was asked.
 
@@ -2972,43 +3118,62 @@ def drop_irrelevant_creators(
     """
     if len(creators) < 2:
         return creators
-    listed = "\n".join(
-        f"{i}. {c.name or '?'}"
-        + (f" (@{c.handle})" if c.handle else "")
-        + (f" — {c.why}" if c.why else "")
-        for i, c in enumerate(creators, start=1)
-    )
-    try:
-        client = OpenAI(api_key=openai_key, timeout=timeout)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": RELEVANCE_SYSTEM},
-                {"role": "user", "content": (
-                    f"The operator asked: {question}\n\n"
-                    + (f"What the account they named is actually like:\n{seed_profile}\n\n"
-                       if seed_profile else "")
-                    + f"Accounts:\n{listed}"
-                )},
-            ],
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        parsed = extract_json_object(response.choices[0].message.content or "")
-    except Exception as exc:
-        _log_failure("web grounding: relevance filter failed: %s", exc, exc=exc)
-        return creators
 
-    rows = parsed.get("drop")
-    if not isinstance(rows, list):
-        return creators
-    cut = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        n = row.get("n")
-        if isinstance(n, int) and 1 <= n <= len(creators):
-            cut[n - 1] = str(row.get("why") or "").strip()[:60]
+    def judge(batch: List[Creator]) -> dict:
+        listed = "\n".join(
+            f"{i}. {c.name or '?'}"
+            + (f" (@{c.handle})" if c.handle else "")
+            + (f" — {c.why}" if c.why else "")
+            for i, c in enumerate(batch, start=1)
+        )
+        try:
+            client = OpenAI(api_key=openai_key, timeout=timeout)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": RELEVANCE_SYSTEM},
+                    {"role": "user", "content": (
+                        f"The operator asked: {question}\n\n"
+                        + (f"What the account they named is actually like:\n{seed_profile}\n\n"
+                           if seed_profile else "")
+                        + _filters_to_check(filters, ctx)
+                        + f"Accounts:\n{listed}"
+                    )},
+                ],
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+            return extract_json_object(response.choices[0].message.content or "") or {}
+        except Exception as exc:
+            _log_failure("web grounding: relevance filter failed: %s", exc, exc=exc)
+            return {}
+
+    # Judged in batches. Every scraped author now reaches this list, and one
+    # call over a hundred and twenty lines drifted: "no brands or shops" let
+    # @shopmyshie through on one run and not the next. A batch of thirty gets
+    # the attention a short list always had — and a list that short is judged
+    # in one call, exactly as before.
+    batches = [creators[i:i + _RELEVANCE_BATCH] for i in range(0, len(creators), _RELEVANCE_BATCH)]
+    if len(batches) == 1:
+        verdicts = [judge(creators)]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=min(4, len(batches))) as pool:
+            verdicts = list(pool.map(judge, batches))
+
+    cut: dict = {}
+    unverified: list = []
+    for offset, parsed in zip(range(0, len(creators), _RELEVANCE_BATCH), verdicts):
+        size = min(_RELEVANCE_BATCH, len(creators) - offset)
+        for row in parsed.get("drop") or [] if isinstance(parsed.get("drop"), list) else []:
+            if isinstance(row, dict) and isinstance(row.get("n"), int) and 1 <= row["n"] <= size:
+                cut[offset + row["n"] - 1] = str(row.get("why") or "").strip()[:60]
+        for row in parsed.get("unverified") or [] if isinstance(parsed.get("unverified"), list) else []:
+            if isinstance(row, dict) and isinstance(row.get("n"), int) and 1 <= row["n"] <= size:
+                unverified.append({"n": offset + row["n"], "what": row.get("what")})
+    creators = _label_unverified(creators, unverified,
+                                 requirements=getattr(filters, "requirements", None) or [])
     if not cut:
         return creators
 
@@ -3129,7 +3294,7 @@ def _engagement_rates(candidates) -> dict:
 
     totals: dict = {}
     for candidate in candidates:
-        item = engine_schema.candidate_primary_item(candidate)
+        item = _post_of(candidate)
         if (getattr(item, "source", "") or "").strip().lower() not in (
             "instagram", "tiktok"
         ):
@@ -3157,6 +3322,20 @@ def _engagement_rates(candidates) -> dict:
     return rates
 
 
+def _post_of(candidate):
+    """The post behind a fused candidate, or the post itself.
+
+    Creators are read from the fused pool AND from every post the paid lanes
+    returned (ResearchResult.social_items), which are plain items, not
+    candidates.
+    """
+    from app.services.research.engine import schema as engine_schema
+
+    if hasattr(candidate, "source_items"):
+        return engine_schema.candidate_primary_item(candidate)
+    return candidate
+
+
 def creators_from_post_authors(
     candidates, rank_by: Optional[str] = None
 ) -> List[Creator]:
@@ -3181,7 +3360,7 @@ def creators_from_post_authors(
     rates = _engagement_rates(candidates) if rank_by == "engagement_rate" else {}
     by_handle: dict = {}
     for candidate in candidates:
-        item = engine_schema.candidate_primary_item(candidate)
+        item = _post_of(candidate)
         source = (getattr(item, "source", "") or "").strip().lower()
         if source not in ("instagram", "tiktok"):
             continue
@@ -3274,6 +3453,7 @@ def creators_from_post_authors(
                 why=", ".join(why),
                 source_url=getattr(item, "url", None) or None,
                 profile_url=profile_url(handle, source),
+                followers=int(fans) if fans is not None else None,
             ),
         )
 
@@ -3706,6 +3886,7 @@ def _research_via_engine(
     rank_by: Optional[str] = None,
     typed_hashtags: Optional[Sequence[str]] = None,
     platform: Optional[str] = None,
+    filters_job=None,
 ) -> Optional[WebContext]:
     """Run the multi-source engine. None when it has nothing to offer.
 
@@ -3880,7 +4061,11 @@ def _research_via_engine(
     # creator cards would bury it.
     if answer != "markets":
         creators = _merge_creators(
-            creators_from_post_authors(result.candidates, rank_by), creators
+            creators_from_post_authors(
+                list(result.candidates) + list(getattr(result, "social_items", None) or []),
+                rank_by,
+            ),
+            creators,
         )
     # One named person was asked about, so one named person is the answer.
     creators = _only_the_subjects(creators, subjects)
@@ -3901,7 +4086,13 @@ def _research_via_engine(
                 if _role_of_turn(t) == "user"
             ])
         )
-    creators = _within_follower_limit(creators, limit)
+    filters = (_filters_from(filters_job)
+               if getattr(settings, "filters_apply_enabled", False) else None)
+    if filters is not None:
+        # The operator's filters as data, carried across the conversation.
+        creators = _apply_data_filters(creators, filters)
+    else:
+        creators = _within_follower_limit(creators, limit)
     # Last, because it is the only step that judges a creator against the
     # QUESTION rather than against a number. Ranking sorts and never drops.
     # The bigger model, not the router's. This is the last judgement before
@@ -3917,8 +4108,12 @@ def _research_via_engine(
         openai_key=settings.openai_api_key,
         model=(getattr(settings, "grounding_escalation_model", None)
                or settings.grounding_model),
-        timeout=float(getattr(settings, "search_timeout", 15.0)),
+        # Every scraped author now reaches this list, not only the pool's,
+        # so it can be a hundred lines. Timing out keeps everyone unfiltered.
+        timeout=max(float(getattr(settings, "search_timeout", 15.0)), 45.0),
         seed_profile=seed_profile,
+        filters=filters,
+        ctx=ctx,
     )
     prose, next_step = _write_answer(
         findings, prompt, answer=answer, markets=markets, creators=creators,
@@ -3955,6 +4150,7 @@ def _research_via_engine(
         country=query.country,
         window=query.window,
         answer=answer,
+        filters=filters.to_dict() if filters is not None else {},
         # Names the lanes that actually delivered, not the engine. An operator
         # reading "no-results" against instagram learns something a bare
         # "research-engine" would hide.
@@ -3981,6 +4177,138 @@ Progress = Callable[..., None]
 
 def _noop(*_args, **_kwargs) -> None:
     pass
+
+
+def _shadow_decisions(prompt: str, history, routed: dict, settings) -> None:
+    """Ask the typed decisions beside the router and log both answers.
+
+    Shadow mode: nothing here changes what the turn does. It runs on a
+    background thread so the operator never waits on it, and every failure is
+    swallowed — it is a measurement, not a dependency. The log line pairs the
+    decision with what the router said, so the two can be compared on real
+    conversations before a decision is ever allowed to steer one.
+    """
+    if not getattr(settings, "decision_shadow_enabled", False):
+        return
+    if not getattr(settings, "openrouter_api_key", None):
+        return
+    said = {k: routed.get(k) for k in ("action", "answer", "topic", "subjects", "reference_accounts")}
+
+    def run() -> None:
+        try:
+            from app.services.decisions import message_kind
+
+            decision = message_kind(prompt, history, settings=settings)
+            logger.info("decision shadow: %s", json.dumps({
+                "message": prompt[:200],
+                "message_kind": decision.choice,
+                "confidence": None if decision.confidence is None else round(decision.confidence, 3),
+                "probabilities": {k: round(v, 3) for k, v in decision.probabilities.items()},
+                "error": decision.error,
+                "latency_ms": decision.latency_ms,
+                "router": said,
+            }, ensure_ascii=False))
+        except Exception as exc:  # a measurement must never break a turn
+            logger.warning("decision shadow failed: %s", exc)
+
+    import threading
+
+    threading.Thread(target=run, name="decision-shadow", daemon=True).start()
+
+
+def _read_filters_meanwhile(prompt: str, history, routed: dict, settings):
+    """Start reading the operator's filters; the search runs meanwhile.
+
+    Returns a future the engine collects before it filters the creators, so
+    the reading costs no waiting — the search takes far longer. The result is
+    logged beside the router's fields either way. None when filter reading is
+    off.
+    """
+    if not (getattr(settings, "filters_shadow_enabled", False)
+            or getattr(settings, "filters_apply_enabled", False)):
+        return None
+    said = {k: routed.get(k) for k in (
+        "country", "max_followers", "min_followers", "exclude_accounts",
+        "platform", "window_days", "topic",
+    )}
+
+    def run():
+        from app.services.filters import extract_filters
+
+        found = extract_filters(prompt, history, settings=settings,
+                                previous=_filters_last_applied(history))
+        logger.info("filters: %s", json.dumps({
+            "message": prompt[:200],
+            "filters": None if found is None else found.to_dict(),
+            "router": said,
+        }, ensure_ascii=False))
+        return found
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="filters")
+    future = pool.submit(run)
+    pool.shutdown(wait=False)
+    return future
+
+
+def _filters_last_applied(history) -> Optional[dict]:
+    """The filters stored with the latest answer that applied any, or None."""
+    for turn in reversed(list(history or [])):
+        if _role_of_turn(turn) != "assistant":
+            continue
+        try:
+            stored = json.loads(_content_of_turn(turn))
+        except ValueError:
+            continue
+        if isinstance(stored, dict) and isinstance(stored.get("filters"), dict):
+            return stored["filters"]
+    return None
+
+
+def _filters_from(job, *, timeout: float = 30.0):
+    """The filters the job read, or None — never raises."""
+    if job is None:
+        return None
+    try:
+        return job.result(timeout=timeout)
+    except Exception as exc:
+        logger.warning("filters unavailable, using the router's fields: %s", exc)
+        return None
+
+
+def _apply_data_filters(creators: List[Creator], filters) -> List[Creator]:
+    """The filters that can be checked against data, checked against it.
+
+    Excluded accounts by handle — they were only ever kept out of the SEEDS,
+    so "not @omayazein" still listed her. The follower range against the
+    count the platform reported, falling back to a count written in the
+    description. A creator whose size is unknown is kept and SAID to be:
+    unlabelled, a name off a web page read as having passed "under 50k".
+    """
+    excluded = {a.lstrip("@").lower() for a in (filters.exclude_accounts or [])}
+    low, high = filters.min_followers, filters.max_followers
+    kept, dropped = [], []
+    for creator in creators:
+        handle = (creator.handle or "").lstrip("@").lower()
+        if handle and handle in excluded:
+            dropped.append(f"{handle}: excluded")
+            continue
+        if low or high:
+            size = creator.followers if creator.followers is not None else follower_count(creator)
+            if size is None:
+                note = "follower count unknown"
+                if note not in (creator.why or ""):
+                    creator = creator.model_copy(update={
+                        "why": f"{note} — {creator.why}" if creator.why else note})
+            elif (high and size > high) or (low and size < low):
+                dropped.append(f"{handle or creator.name}: {size:,} followers")
+                continue
+        kept.append(creator)
+    if dropped:
+        logger.info("web grounding: filters removed %d of %d: %s",
+                    len(dropped), len(creators), dropped[:8])
+    return kept
 
 
 def gather_web_context(
@@ -4026,6 +4354,8 @@ def gather_web_context(
     # Never ask for something the operator has already written.
     routed = _unblock_a_complete_request(routed, _search_text(prompt, history), ctx)
     routed = _unmerge_a_new_person(routed, prompt, history, ctx)
+    _shadow_decisions(prompt, history, routed, settings)
+    _filters_job = _read_filters_meanwhile(prompt, history, routed, settings)
     action = routed["action"]
     if action == "ask":
         logger.info("web grounding: asking before searching — %s", routed["question"])
@@ -4144,7 +4474,8 @@ def gather_web_context(
     # a new hunt that throws the list away. A NEW name — "who is Jane Doe?"
     # after a scrape plan for @isaac — is a search. There is no list to walk.
     shown = _creators_shown(history)
-    if subjects and _subjects_already_shown(subjects, shown):
+    if (subjects and _subjects_already_shown(subjects, shown)
+            and _means_someone_on_screen(prompt, subjects, shown, settings=settings)):
         emit(
             "searching",
             query=", ".join(subjects[:8]),
@@ -4369,6 +4700,7 @@ def gather_web_context(
             rank_by=routed.get("rank_by"),
             typed_hashtags=routed.get("hashtags") or [],
             platform=routed.get("platform"),
+            filters_job=_filters_job,
         )
         if engine_context is not None:
             return engine_context
