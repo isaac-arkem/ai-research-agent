@@ -684,7 +684,7 @@ def _plan_text(plan: Optional[dict]) -> str:
 
 
 def _turns_for_router(
-    history: Optional[Sequence[ChatTurn]], keep: int = 4
+    history: Optional[Sequence[ChatTurn]], keep: int = 8
 ) -> List[dict]:
     """History for routing, without the page dump that buries the names.
 
