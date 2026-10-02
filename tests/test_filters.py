@@ -245,3 +245,37 @@ def test_a_search_answer_stores_its_filters():
     with patch.object(research.conversation_service, "store", store):
         research._persist_assistant("c", "u", result)
     assert json.loads(saved[0])["filters"] == {"countries": ["SA"], "max_followers": 50000}
+
+
+# ── options already settled by the prompt are not offered again ─────
+
+
+def test_nothing_is_added_to_the_basis_request_without_filters():
+    from app.services.grounding import _already_set_for_bases
+
+    assert _already_set_for_bases(None) == ""
+    assert _already_set_for_bases(Filters(platforms=["tiktok"], exclude_accounts=["x"])) == ""
+
+
+def test_country_size_and_requirements_are_handed_over_as_settled():
+    """"smaller UK artists under 100k" was offered "similar size of following"
+    and "same country and scene"."""
+    from app.services.grounding import _already_set_for_bases
+
+    text = _already_set_for_bases(Filters(countries=["GB"], max_followers=100_000,
+                                          requirements=["no brands or shops"]))
+    assert "- Based in: GB" in text and "- Follower count: under 100,000" in text
+    assert "- no brands or shops" in text and "Never offer a way of comparing" in text
+    assert "between 10,000 and 50,000" in _already_set_for_bases(Filters(min_followers=10_000, max_followers=50_000))
+
+
+def test_the_basis_proposer_is_shown_what_is_already_set():
+    from app.services.grounding import propose_comparison_bases
+
+    client = _model_says('{"bases": [{"label": "same music style"}, {"label": "same audience"}]}')
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        propose_comparison_bases("similar to @x", ["x"], openai_key="sk", already_set="ALREADY SET: UK")
+    assert client.chat.completions.create.call_args.kwargs["messages"][1]["content"].endswith("ALREADY SET: UK")
+    with patch("app.services.grounding.OpenAI", return_value=client):
+        propose_comparison_bases("similar to @x", ["x"], openai_key="sk")
+    assert "ALREADY SET" not in client.chat.completions.create.call_args.kwargs["messages"][1]["content"]
