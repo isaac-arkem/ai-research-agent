@@ -4224,6 +4224,54 @@ def _noop(*_args, **_kwargs) -> None:
     pass
 
 
+def _we_asked_for_platform(history, keep: int = 6) -> bool:
+    """Did we ask the platform question in the recent conversation?
+
+    Recent, not just last: "read web pages", then a comparison picked, then
+    "find more like him" — the choice was made two turns back and still
+    holds, and the decision reads those same turns to see it.
+    """
+    for turn in list(history or [])[-keep:]:
+        if _role_of_turn(turn) != "assistant":
+            continue
+        try:
+            stored = json.loads(_content_of_turn(turn))
+        except ValueError:
+            continue
+        if isinstance(stored, dict) and "platform" in (stored.get("missing_fields") or []):
+            return True
+    return False
+
+
+def _platform_chosen(prompt: str, history, settings) -> Optional[str]:
+    """The platform the operator chose, when a confident decision says so.
+
+    Asked only where the platform question would otherwise go out. None —
+    ask as before — when decisions are off, unavailable or unsure.
+    """
+    if not getattr(settings, "decision_steer_enabled", False):
+        return None
+    # Only a reply to OUR platform question. Asked about a first message with
+    # no platform in it, the decision guessed TikTok for @khaby.lame — because
+    # he is famous there — and a guess is not the operator's choice.
+    if not _we_asked_for_platform(history):
+        return None
+    from app.services.decisions import _endpoint, platform_choice
+
+    if not _endpoint(getattr(settings, "decision_model", "gpt-4o-mini"), settings)[0]:
+        return None
+    decision = platform_choice(prompt, history, settings=settings)
+    floor = float(getattr(settings, "decision_min_confidence", 0.85))
+    steers = bool(decision.choice and decision.choice != "not_said"
+                  and decision.confidence is not None and decision.confidence >= floor)
+    logger.info("decision: %s", json.dumps({
+        "message": prompt[:200], "platform_choice": decision.choice,
+        "confidence": None if decision.confidence is None else round(decision.confidence, 3),
+        "steers": steers, "error": decision.error, "latency_ms": decision.latency_ms,
+    }, ensure_ascii=False))
+    return decision.choice if steers else None
+
+
 def _ask_message_kind(prompt: str, history, settings):
     """Start the "what is this message?" decision; the router runs meanwhile.
 
@@ -4316,6 +4364,37 @@ def _read_filters_meanwhile(prompt: str, history, routed: dict, settings):
 def _same_accounts(a, b) -> bool:
     norm = lambda hs: {str(h).lstrip("@").strip().casefold() for h in (hs or []) if str(h).strip()}
     return bool(norm(a)) and norm(a) == norm(b)
+
+
+def _named_in(prompt: str, handles) -> bool:
+    """Did the operator type any of these accounts in this message?"""
+    text = _norm_subject(prompt or "")
+    return any(_norm_subject(str(h)) and _norm_subject(str(h)) in text for h in (handles or []))
+
+
+def _meant_the_compared_account(prompt: str, history, compared, other, settings) -> bool:
+    """A confident decision that the follow-up means the compared account.
+
+    False — keep the router's reading — when decisions are off, unavailable,
+    unsure, or say it means someone from the results.
+    """
+    if not getattr(settings, "decision_steer_enabled", False):
+        return False
+    from app.services.decisions import _endpoint, who_is_meant
+
+    if not _endpoint(getattr(settings, "decision_model", "gpt-4o-mini"), settings)[0]:
+        return False
+    decision = who_is_meant(prompt, history, compared=compared, other=other, settings=settings)
+    floor = float(getattr(settings, "decision_min_confidence", 0.85))
+    steers = bool(decision.choice == "compared_account"
+                  and decision.confidence is not None and decision.confidence >= floor)
+    logger.info("decision: %s", json.dumps({
+        "message": prompt[:200], "who_is_meant": decision.choice,
+        "confidence": None if decision.confidence is None else round(decision.confidence, 3),
+        "compared": list(compared), "router_picked": list(other), "steers": steers,
+        "error": decision.error,
+    }, ensure_ascii=False))
+    return steers
 
 
 def _comparison_in_force(history) -> Optional[dict]:
@@ -4654,6 +4733,24 @@ def gather_web_context(
     #
     # A new handle reopens it. "no, @thisone" has changed the subject, and
     # the basis for a different person is a different question.
+    # Who "him" is. After an answer that highlighted one creator, "find more
+    # creators like him" was read as that creator every time, while the
+    # comparison saved with the thread was another account. Only when the
+    # router's pick differs from the saved comparison AND the operator did not
+    # type that pick themselves — "similar to @mrbeast" is never questioned.
+    if seeds and not _is_new_question:
+        _saved = _comparison_in_force(history)
+        if (_saved and not _same_accounts(_saved.get("seeds"), seeds)
+                and not _named_in(prompt, seeds)
+                and _meant_the_compared_account(prompt, history, _saved["seeds"], seeds, settings)):
+            logger.info("web grounding: %r means %s, not %s", prompt[:60], _saved["seeds"], seeds)
+            _topic_now = (routed.get("topic") or "").strip()
+            for name in seeds:
+                _topic_now = re.sub(re.escape(str(name).lstrip("@")), "@" + str(_saved["seeds"][0]).lstrip("@"),
+                                    _topic_now, flags=re.IGNORECASE)
+            routed["topic"] = _topic_now or f"creators similar to @{_saved['seeds'][0]}"
+            seeds = [str(h).lstrip("@") for h in _saved["seeds"]]
+
     # The comparison in force. On the turn that answers "similar in which
     # way?" the message IS the choice. On a later turn about the SAME
     # accounts that is not a new question, the choice made then still holds:
@@ -4718,6 +4815,18 @@ def gather_web_context(
                 ]
             )
         )
+        if not said_platform:
+            # Before asking: have they already chosen, in words the platform
+            # check cannot read? "on the gram" is Instagram; "read web pages"
+            # is the web-only answer the question itself offers. A confident
+            # decision settles it; anything else asks, as before.
+            _chosen = _platform_chosen(prompt, history, settings)
+            if _chosen in ("tiktok", "instagram", "both"):
+                routed["platform"] = _chosen
+                said_platform = True
+            elif _chosen == "web_only":
+                logger.info("web grounding: web only, as the operator chose — no platform question")
+                said_platform = True
         if not said_platform:
             logger.info("web grounding: comparison with no platform — asking which lane")
             return WebContext(

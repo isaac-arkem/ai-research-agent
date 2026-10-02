@@ -251,16 +251,72 @@ def _turn_text(role: str, content: str) -> str:
     return "Assistant: " + " ".join(p for p in parts if p)[:600]
 
 
-def message_kind(prompt: str, history, *, settings, keep: int = 6) -> Decision:
-    """What is this message: more of the same research, something new, a
-    question about what is on screen, or chitchat?"""
+def _conversation(prompt: str, history, keep: int = 6) -> str:
+    """The recent turns and the latest message, as a decision reads them."""
     turns = []
     for turn in list(history or [])[-keep:]:
         role = getattr(turn, "role", None) or (turn.get("role") if isinstance(turn, dict) else "")
         content = getattr(turn, "content", None) or (turn.get("content") if isinstance(turn, dict) else "")
         turns.append(_turn_text(str(role), str(content or "")))
-    context = (
+    return (
         ("Conversation so far:\n" + "\n".join(turns) + "\n\n" if turns else "No earlier turns.\n\n")
         + f"Latest message: {prompt.strip()}"
     )
-    return choose(MESSAGE_KIND_QUESTION, MESSAGE_KINDS, context, settings=settings)
+
+
+def message_kind(prompt: str, history, *, settings, keep: int = 6) -> Decision:
+    """What is this message: more of the same research, something new, a
+    question about what is on screen, or chitchat?"""
+    return choose(MESSAGE_KIND_QUESTION, MESSAGE_KINDS, _conversation(prompt, history, keep),
+                  settings=settings)
+
+
+PLATFORM_QUESTION = (
+    "A creator-research assistant asked the operator where to look for creators. "
+    "Which have they CHOSEN, in their own words? Only what they said counts: never "
+    "infer a platform from where an account is known or popular — if they did not "
+    "say, the answer is not_said."
+)
+
+PLATFORM_CHOICES: List[Tuple[str, str]] = [
+    ("tiktok", "TikTok"),
+    ("instagram", "Instagram (\"insta\", \"IG\", \"the gram\")"),
+    ("both", "both TikTok and Instagram"),
+    ("web_only",
+     "no social platform: search the web / read web pages only (\"read web pages\", "
+     "\"no platform\", \"just the web\", \"either is fine, use the web\")"),
+    ("not_said", "they have not chosen yet — including an acknowledgement like "
+                 "\"ok\" or \"alright sure\", which chooses nothing"),
+]
+
+
+def who_is_meant(prompt: str, history, *, compared: Sequence[str], other: Sequence[str],
+                 settings, keep: int = 6) -> Decision:
+    """Does a follow-up mean the account being compared against, or someone
+    named in the results?
+
+    "find more creators like him", after an answer that said "CoryXKenshin
+    stands out", was read as CoryXKenshin five times out of five — while the
+    search had been about @khaby.lame all along.
+    """
+    at = lambda hs: ", ".join("@" + str(h).lstrip("@") for h in hs)
+    answers = [
+        ("compared_account", f"{at(compared)} — the account(s) the research has been comparing against"),
+        ("someone_in_results", f"{at(other)} — named in the results just shown"),
+        ("unclear", "the message does not make it clear"),
+    ]
+    question = ("The operator asked for more creators like someone. Who do they mean? "
+                "A pronoun (him, her, them) usually points at whoever the conversation has "
+                "been about, not at a name mentioned once in the last answer.")
+    return choose(question, answers, _conversation(prompt, history, keep), settings=settings)
+
+
+def platform_choice(prompt: str, history, *, settings, keep: int = 6) -> Decision:
+    """Which platform the operator has chosen — including "the web only".
+
+    The platform question accepted only messages containing a platform word,
+    so "read web pages" — the very option the question itself offered, "without
+    one I can only read web pages" — was met with the same question, forever.
+    """
+    return choose(PLATFORM_QUESTION, PLATFORM_CHOICES, _conversation(prompt, history, keep),
+                  settings=settings)
