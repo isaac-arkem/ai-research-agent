@@ -351,3 +351,134 @@ def test_the_comparison_is_saved_with_the_turn():
             ok=True, clarifying_question="next?", findings=[WebFinding(title="t", url="https://x", snippet="s")],
             comparison={"seeds": ["khaby.lame"], "basis": "same humor style"}))
     assert json.loads(saved[0])["comparison"] == {"seeds": ["khaby.lame"], "basis": "same humor style"}
+
+
+# ── the answer to "which platform?" — including "the web only" ───────
+
+
+def _platform_q():
+    import json as _json
+    from app.models.domain import ChatTurn
+    return [ChatTurn(role="user", content="find creators similar to @khaby.lame"),
+            ChatTurn(role="assistant", content=_json.dumps({
+                "clarifying_question": "Which platform should I look on — TikTok or Instagram?",
+                "missing_fields": ["platform"]}))]
+
+
+def test_the_platform_decision_is_only_consulted_after_our_platform_question():
+    """Asked about a first message, it guessed TikTok for @khaby.lame because
+    he is famous there — a guess is not the operator's choice."""
+    from app.services import grounding
+
+    s = _settings(decision_steer_enabled=True, decision_min_confidence=0.85)
+    with patch("app.services.decisions.choose") as choose_:
+        assert grounding._platform_chosen("find creators similar to @khaby.lame", [], s) is None
+    assert not choose_.called
+    with patch("app.services.decisions.choose", return_value=Decision(choice="web_only", confidence=1.0)):
+        assert grounding._platform_chosen("read web pages", _platform_q(), s) == "web_only"
+
+
+def test_only_a_confident_choice_counts_and_not_said_never_does():
+    from app.services import grounding
+
+    s = _settings(decision_steer_enabled=True, decision_min_confidence=0.85)
+    for d, want in ((Decision(choice="tiktok", confidence=0.99), "tiktok"),
+                    (Decision(choice="tiktok", confidence=0.5), None),
+                    (Decision(choice="not_said", confidence=1.0), None),
+                    (Decision(choice=None, error="down"), None)):
+        with patch("app.services.decisions.choose", return_value=d):
+            assert grounding._platform_chosen("x", _platform_q(), s) == want
+    off = _settings(decision_steer_enabled=False)
+    assert grounding._platform_chosen("read web pages", _platform_q(), off) is None
+
+
+def _reply_to_platform_question(prompt, choice):
+    from app.models.domain import ComparisonBasis
+    from app.services import grounding
+    from tests.test_grounding import _ctx, _settings as g_settings, _triage
+
+    client = _triage('{"action":"search","topic":"creators similar to @khaby.lame","answer":"creators",'
+                     '"reference_accounts":["khaby.lame"],"platform":null}')
+    with patch("app.services.grounding.OpenAI", return_value=client), \
+         patch("app.services.grounding._ask_message_kind", return_value=None), \
+         patch("app.services.grounding._platform_chosen", return_value=choice), \
+         patch("app.services.grounding._bases_worth_offering", return_value=[]), \
+         patch("app.services.grounding.provider_from_settings"), \
+         patch("app.services.grounding._research_via_engine", return_value=None) as engine:
+        web = grounding.gather_web_context(prompt, _ctx(), _platform_q(),
+                                           settings=g_settings(research_engine_enabled=True))
+    return web, engine
+
+
+def test_web_only_is_an_answer_and_searches_without_a_platform():
+    """"read web pages" — the option the question itself offers — was met
+    with the same question, forever."""
+    web, engine = _reply_to_platform_question("read web pages", "web_only")
+    assert web.missing != ["platform"] and engine.called
+    assert engine.call_args.kwargs["platform"] is None
+
+
+def test_a_platform_said_in_other_words_is_used():
+    web, engine = _reply_to_platform_question("on the gram", "instagram")
+    assert engine.call_args.kwargs["platform"] == "instagram"
+
+
+def test_no_choice_still_asks_which_platform():
+    web, engine = _reply_to_platform_question("alright sure", None)
+    assert web.missing == ["platform"] and not engine.called
+
+
+# ── "more like him" means the account the research is about ──────────
+
+
+def _more_like(prompt, router_refs, meant):
+    import json as _json
+    from app.models.domain import ChatTurn
+    from app.services import grounding
+    from app.services.grounding import WebContext
+    from tests.test_grounding import _ctx, _settings as g_settings, _triage
+
+    history = [
+        ChatTurn(role="user", content="find creators similar to @khaby.lame on tiktok"),
+        ChatTurn(role="assistant", content=_json.dumps({
+            "understood_so_far": "CoryXKenshin stands out.", "clarifying_question": "More?",
+            "missing_fields": [], "creators": [{"name": "CoryXKenshin", "handle": "coryxkenshin"}],
+            "comparison": {"seeds": ["khaby.lame"], "basis": "same humor style"}})),
+    ]
+    refs = _json.dumps(router_refs)
+    client = _triage('{"action":"search","topic":"creators similar to CoryXKenshin on TikTok","answer":"creators",'
+                     f'"reference_accounts":{refs},"platform":"tiktok"}}')
+    with patch("app.services.grounding.OpenAI", return_value=client), \
+         patch("app.services.grounding._ask_message_kind", return_value=None), \
+         patch("app.services.grounding._message_kind_from", return_value="continues_research"), \
+         patch("app.services.grounding._meant_the_compared_account", return_value=meant) as asked, \
+         patch("app.services.grounding._bases_worth_offering", return_value=[]), \
+         patch("app.services.grounding.provider_from_settings"), \
+         patch("app.services.grounding._research_via_engine", return_value=WebContext(action="search")) as engine:
+        grounding.gather_web_context(prompt, _ctx(), history, settings=g_settings(research_engine_enabled=True))
+    return asked, engine.call_args.kwargs
+
+
+def test_him_means_the_compared_account_when_the_decision_says_so():
+    """Read as CoryXKenshin five times out of five, while the comparison saved
+    with the thread was @khaby.lame."""
+    asked, kw = _more_like("find more creators like him", ["coryxkenshin"], True)
+    assert asked.called
+    assert kw["seeds"] == ["khaby.lame"]
+    assert "@khaby.lame" in kw["prompt"] and "coryxkenshin" not in kw["prompt"].lower()
+    assert "compared on: same humor style" in kw["prompt"]
+
+
+def test_unsure_or_someone_in_the_results_keeps_the_routers_reading():
+    asked, kw = _more_like("find more like that reaction guy", ["coryxkenshin"], False)
+    assert asked.called and kw["seeds"] == ["coryxkenshin"]
+
+
+def test_a_name_the_operator_typed_is_never_second_guessed():
+    asked, kw = _more_like("find more creators like coryxkenshin", ["coryxkenshin"], True)
+    assert not asked.called and kw["seeds"] == ["coryxkenshin"]
+
+
+def test_the_same_account_needs_no_decision():
+    asked, kw = _more_like("find more creators like him", ["khaby.lame"], True)
+    assert not asked.called and kw["seeds"] == ["khaby.lame"]
