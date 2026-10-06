@@ -462,7 +462,6 @@ def search_and_enrich(
     ig_creators: List[str] | None = None,
     apify_token: str = None,
     hashtags: List[str] | None = None,
-    country_name: str | None = None,
 ) -> Dict[str, Any]:
     """Full Instagram search: find reels, then fetch captions for top results.
 
@@ -482,8 +481,8 @@ def search_and_enrich(
     """
     # Apify instead of ScrapeCreators. Same contract as the TikTok lane: an
     # Apify token with no ScrapeCreators token means Apify is the only way to
-    # answer, so take it. A named market uses Instagram user search
-    # (country + keyword); otherwise hashtag discovery still runs.
+    # answer, so take it. Hashtag discovery is what surfaces creators in a
+    # market, whether or not a country was named.
     if apify_token and not token:
         from . import apify_social
 
@@ -495,7 +494,6 @@ def search_and_enrich(
             token=apify_token,
             ig_creators=ig_creators,
             hashtags=hashtags,
-            country_name=country_name,
         )
 
     core_topic = _extract_core_subject(topic)

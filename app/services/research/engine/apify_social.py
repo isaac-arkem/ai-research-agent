@@ -10,10 +10,9 @@ Activated when SOCIAL_PROVIDER=apify is set, or automatically when no
 SCRAPECREATORS_API_KEY is configured.
 
 Actors used (pay-per-result, billed to the Apify account):
-- clockworks/tiktok-scraper         (~$0.0023/result)
-- apify/instagram-hashtag-scraper   (~$0.0021/result; no market named)
-- apify/instagram-search-scraper    (user search when a market is named)
-- apify/instagram-post-scraper      (~$0.0013/post, creator profiles only)
+- clockworks/tiktok-scraper        (~$0.0023/result)
+- apify/instagram-hashtag-scraper  (~$0.0021/result)
+- apify/instagram-post-scraper     (~$0.0013/post, creator profiles only)
 """
 
 from typing import Any, Dict, List, Optional
@@ -24,7 +23,6 @@ from .relevance import token_overlap_relevance as _compute_relevance
 APIFY_BASE = "https://api.apify.com/v2"
 TIKTOK_ACTOR = "clockworks~tiktok-scraper"
 IG_HASHTAG_ACTOR = "apify~instagram-hashtag-scraper"
-IG_SEARCH_ACTOR = "apify~instagram-search-scraper"
 IG_POSTS_ACTOR = "apify~instagram-post-scraper"
 
 # Results per query/hashtag by depth. Kept modest: actors are pay-per-result.
@@ -53,9 +51,6 @@ _TIKTOK_FIELDS = (
 _INSTAGRAM_FIELDS = (
     "id,shortCode,caption,url,ownerUsername,timestamp,hashtags,"
     "videoPlayCount,videoViewCount,likesCount,commentsCount,videoDuration"
-)
-_INSTAGRAM_SEARCH_FIELDS = (
-    "id,username,url,fullName,biography,followersCount,verified"
 )
 
 
@@ -285,100 +280,6 @@ def _map_instagram_item(raw: Dict[str, Any], core_topic: str) -> Dict[str, Any]:
     }
 
 
-def _profile_username(raw: Dict[str, Any]) -> str:
-    name = raw.get("username") or raw.get("ownerUsername") or ""
-    user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
-    if not name:
-        name = user.get("username") or ""
-    return str(name).lstrip("@").strip()
-
-
-def _map_instagram_profile(
-    raw: Dict[str, Any],
-    core_topic: str,
-    country: str,
-) -> Optional[Dict[str, Any]]:
-    """Map an instagram-search-scraper user row to instagram.py's item shape."""
-    username = _profile_username(raw)
-    if not username:
-        return None
-    full = str(raw.get("fullName") or raw.get("full_name") or "").strip()
-    bio = str(raw.get("biography") or raw.get("bio") or "").strip()
-    text = " ".join(part for part in (full, bio) if part)
-    url = str(raw.get("url") or "").strip() or f"https://www.instagram.com/{username}/"
-    return {
-        "video_id": f"iguser:{username.lower()}",
-        "text": text,
-        "url": url,
-        "author_name": username,
-        "date": None,
-        "engagement": {"views": 0, "likes": 0, "comments": 0},
-        "hashtags": [],
-        "duration": None,
-        "author_fans": raw.get("followersCount") or raw.get("followers"),
-        "author_verified": bool(raw.get("verified") or raw.get("is_verified")),
-        "author_nickname": full,
-        "relevance": _compute_relevance(core_topic, text, []),
-        "why_relevant": f"Instagram user search: {country}",
-        "caption_snippet": "",
-        "_ig_user_search": True,
-    }
-
-
-def _user_search_query(country: str, keywords: List[str], with_creator: bool) -> str:
-    """Country and keyword in the same query, as community-mapper does.
-
-    One comma-separated string so several tags share a single actor run
-    instead of one scrape per tag.
-    """
-    country = country.strip()
-    terms = []
-    for keyword in keywords:
-        if with_creator:
-            terms.append(f"{country} {keyword} creator")
-        else:
-            terms.append(f"{country} {keyword}")
-    return ", ".join(terms)
-
-
-def _search_instagram_users(
-    country: str,
-    keywords: List[str],
-    limit: int,
-    token: str,
-) -> tuple[List[Dict[str, Any]], Optional[str]]:
-    """apify/instagram-search-scraper, searchType=user.
-
-    Tries the person-biased '... creator' form first. If Instagram blocks it
-    or returns no users, one fallback without 'creator' — not a second hunt
-    stacked on a successful one.
-    """
-    last_error = None
-    for with_creator in (True, False):
-        query = _user_search_query(country, keywords, with_creator)
-        _log(f"Instagram user search: {query!r} limit={limit}")
-        try:
-            raw_items = _run_actor(
-                IG_SEARCH_ACTOR,
-                {
-                    "search": query,
-                    "searchType": "user",
-                    "searchLimit": limit,
-                    "liveSearch": True,
-                },
-                token,
-                fields=_INSTAGRAM_SEARCH_FIELDS,
-            )
-        except Exception as e:
-            last_error = f"{type(e).__name__}: {e}"
-            _log(f"Instagram user search error: {e}")
-            raw_items = []
-        found = [raw for raw in raw_items if _profile_username(raw)]
-        if found:
-            return found, None
-    return [], last_error
-
-
 def search_instagram_apify(
     topic: str,
     from_date: str,
@@ -387,14 +288,12 @@ def search_instagram_apify(
     token: str = None,
     ig_creators: List[str] | None = None,
     hashtags: List[str] | None = None,
-    country_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Instagram via Apify.
+    """Instagram search via Apify: hashtag scrape of the topic plus optional
+    creator profile posts.
 
-    A named market uses instagram-search-scraper (country + keyword in one
-    query) and does not also run the hashtag actor — that feed is global.
-    No market keeps the hashtag scrape. Named handles still use the posts
-    actor either way.
+    A named country does not change this. Discovery stays on the hashtag
+    actor whether or not a market was named.
     """
     if not token:
         return {"items": [], "error": "No APIFY_API_TOKEN configured"}
@@ -407,7 +306,6 @@ def search_instagram_apify(
     seen: set[str] = set()
     items: List[Dict[str, Any]] = []
     last_error = None
-    market = str(country_name or "").strip()
 
     # Every resolved hashtag, not one derived from the topic.
     #
@@ -424,29 +322,10 @@ def search_instagram_apify(
         for t in (hashtags or [])
         if t and str(t).strip()
     ]
-
-    if market:
-        # User search puts the country in the query. The hashtag actor cannot,
-        # and running both would pay twice then put global tag authors on a
-        # market list. Typed tags are the keywords; without them, the topic
-        # — not a glued hashtag nobody would type into people search.
-        keywords = tags if tags else ([core_topic] if core_topic else [])
-        if keywords:
-            raw_items, last_error = _search_instagram_users(
-                market, keywords, limit, token,
-            )
-            for raw in raw_items:
-                item = _map_instagram_profile(raw, core_topic, market)
-                if not item:
-                    continue
-                vid = item["video_id"]
-                if vid and vid not in seen:
-                    seen.add(vid)
-                    items.append(item)
-    if not market and not tags:
+    if not tags:
         derived = _to_hashtag_form(core_topic)
         tags = [derived] if derived else []
-    if not market and tags:
+    if tags:
         _log(f"Instagram hashtag actor run: {['#'+t for t in tags]} limit={limit}")
         try:
             raw_items = _run_actor(
@@ -489,12 +368,6 @@ def search_instagram_apify(
     if not items:
         return {"items": [], "error": last_error}
 
-    # User-search rows have no post date. Date-filter only the posts; if any
-    # post is in range, _filter_and_sort would otherwise drop every profile.
-    posts = [i for i in items if not i.get("_ig_user_search")]
-    profiles = [i for i in items if i.get("_ig_user_search")]
-    if posts:
-        posts = _filter_and_sort(posts, from_date, to_date, "Instagram")
-    items = profiles + posts
-    _log(f"Instagram: {len(items)} results via Apify")
+    items = _filter_and_sort(items, from_date, to_date, "Instagram")
+    _log(f"Instagram: {len(items)} posts via Apify")
     return {"items": items, "error": last_error}
