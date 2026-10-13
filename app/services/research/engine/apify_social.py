@@ -49,7 +49,7 @@ _TIKTOK_FIELDS = (
     "videoMeta,playCount,diggCount,commentCount,shareCount"
 )
 _INSTAGRAM_FIELDS = (
-    "id,shortCode,caption,url,ownerUsername,timestamp,hashtags,"
+    "id,shortCode,caption,url,ownerUsername,ownerFullName,timestamp,hashtags,"
     "videoPlayCount,videoViewCount,likesCount,commentsCount,videoDuration"
 )
 
@@ -162,6 +162,10 @@ def _map_tiktok_item(raw: Dict[str, Any], core_topic: str) -> Dict[str, Any]:
         "author_fans": author_fans,
         "author_verified": author_verified,
         "author_nickname": author_meta.get("nickName") or "",
+        # The account's own description. A nickname such as "2 Beers 1
+        # Backpack" is otherwise indistinguishable from a page, and this is
+        # the text that says which it is. A real name does not need it.
+        "author_bio": " ".join(str(author_meta.get("signature") or "").split())[:300],
         "text": text,
         "url": url,
         "author_name": author_name,
@@ -266,6 +270,10 @@ def _map_instagram_item(raw: Dict[str, Any], core_topic: str) -> Dict[str, Any]:
         "text": text,
         "url": url,
         "author_name": raw.get("ownerUsername") or "",
+        # The same keys the TikTok mapper fills, so one creator builder and
+        # one relevance filter read both platforms. A post item carries the
+        # owner's display name but no bio; that would take a profile scrape.
+        "author_nickname": raw.get("ownerFullName") or "",
         "date": _iso_to_date(raw.get("timestamp")),
         "engagement": {
             "views": _clamp(views),

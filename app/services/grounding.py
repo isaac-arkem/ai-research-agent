@@ -1295,6 +1295,8 @@ NEVER INVENT A FACT YOU WERE NOT GIVEN. This is the whole risk of answering with
 
 FILTERING AND SORTING ARE EXACT WORK, SO DO THEM EXACTLY. Asked for everyone over 10k, use the numbers on screen and return the ones over 10k — all of them, not a sample. Asked to sort, sort. Do not re-describe the list instead of operating on it.
 
+BRANDS AND PAGES STAY OUT UNLESS THEY ASKED FOR THEM. A list of creators is people. A real person's name stays even when the bio or the caption sounds like a page: "Natasha Ibrahim", "RiaRocky", "The Digital Nomad Guy". A nickname is judged from the bio and the caption on the line. Keep it when either shows a person. Leave it out when both are a page and no person shows up ("AKTRAVELS", "Down to Earth Travel", "daily clips", "follow for travel deals"). When the line says nothing either way, keep them. If they asked for brands, pages, shops or businesses, keep those and say that you did.
+
 WHEN YOU FILTER ON A JUDGEMENT RATHER THAN A NUMBER, SHOW THE JUDGEMENT. Armenian-language handles posting from Yerevan are one thing; a Los Angeles radio station that appeared under an Armenian hashtag is another. Name the ones you are confident about, name the ones you are not, and let the operator decide the edge.
 
 A GREETING IS ANSWERED, NOT DEFLECTED — AND WHERE YOU ARE IS THE ANSWER.
@@ -3048,11 +3050,21 @@ The seed is a PERSON MAKING CONTENT. So ask of each one: is this an account of t
   a picture of flowers, a landscape, a pet or a car is not about a person at all
   a post in a language and place with no connection to the request is somebody else's feed
 
-KEEP ANYTHING YOU ARE UNSURE OF. A name and one line of context is thin evidence, and a creator wrongly dropped is invisible to the operator — they cannot see what is not there, while an irrelevant one they can see and ignore. When the line says nothing either way, keep it.
+PEOPLE, NOT PAGES. A creator list is people. Read the display name, the bio, and the caption.
+
+A real person's name stays, even when the bio or the caption sounds like a page. The post may show them, quote them, or promote them. "Natasha Ibrahim", "RiaRocky", "The Digital Nomad Guy", "Pati in Thailand", and "James | Expat in Thailand" stay.
+
+A nickname or a show title has no real name. Use the bio and the caption. Keep them when either shows a person speaking as themselves ("I moved to Bangkok", "I'm Alex"). Drop them when the bio and the caption are a page and no person shows up: "AKTRAVELS", "Down to Earth Travel", "Best Spots in 🌍", "daily clips", "we post the best spots", "follow for travel deals". A radio station, a blog, a magazine and a shop are the same kind of miss. When the bio and the caption say nothing either way, keep them.
+
+A page is shown by what the account says about itself: it sells, books, or advertises ("Private Yacht Charters", "DM « infos »", "your next adventure starts here"), it reads out news or weather bulletins, it speaks as a business ("we", "our tours"), or its name is a business ("Travel & Tours", "Destinations"). Nothing else is evidence of a page. A caption in the first person ("I've always been here", "I came to Thailand") is a person speaking as themselves — keep them. A caption that is only hashtags, a scene ("The girl in the train"), or a building update is nothing either way — keep them. A first name on its own ("Jasper") is a person's name.
+
+This drop is the default. Skip it only when the question, or a filter you were given, asks for brands, pages, shops or businesses ("include brands", "brand accounts too", "pages as well"). Then an account of that kind stays if it otherwise answers the question. That request is permission, not a test a person fails, and it is not something to mark unverified.
+
+KEEP A PERSON YOU ARE UNSURE OF. A human name and one line of context is thin evidence, and a creator wrongly dropped is invisible to the operator — they cannot see what is not there, while an irrelevant one they can see and ignore. When the line says nothing either way about whether a person answers the question, keep them. A nickname whose bio and caption say nothing either way stays. An outlet whose bio and caption never show a person is not uncertainty — drop it.
 
 KEEP SMALL ACCOUNTS. Few followers is not irrelevance. Unless the operator asked for size, an account with two hundred followers doing exactly the right thing is an answer.
 
-JUDGE AGAINST THE QUESTION, NOT AGAINST QUALITY. You are not ranking. The only test is whether someone reading the question would say "that is not what I asked for"."""
+JUDGE AGAINST THE QUESTION, NOT AGAINST QUALITY. You are not ranking. A creator question asks for people, so a page fails it even when the page is on the topic. The test is whether someone reading the question would say "that is not what I asked for"."""
 
 
 # Accounts per relevance call. See drop_irrelevant_creators.
@@ -3088,13 +3100,16 @@ def _filters_to_check(filters, ctx: Optional[AgentContext]) -> str:
         + "\n".join(lines) + "\n\n"
         "For each account and each filter:\n"
         "- its line SHOWS it fails the filter -> put it in \"drop\", and say which filter in \"why\";\n"
-        "- it plainly passes -> keep it, say nothing;\n"
+        "- it plainly passes -> this filter is no reason to drop it, say nothing. Passing a filter "
+        "never keeps an account the rules above drop: a business in Thailand is still a business;\n"
         "- its line shows nothing either way -> keep it. For a REQUIREMENT, also put it in \"unverified\" "
         "with the requirement you could not check. For a COUNTRY, say nothing: most accounts never state "
         "where they are, and a label on every card tells the operator nothing.\n"
         "Evidence of a country is anything in the line: a country suffix in the handle (.pk, _ng, .id, ksa), "
         "a flag, a city or place name, the language or script of the caption, a currency or phone code.\n"
         "Never drop on a guess: no evidence is not a failure.\n"
+        "A requirement that asks to include brands, pages, shops or businesses is permission to keep them. "
+        "It is not a test an account fails, and it is not something to mark unverified.\n"
         'Return JSON: {"drop": [{"n": <number>, "why": "<the filter it fails>"}], '
         '"unverified": [{"n": <number>, "what": "<the filter, a few words>"}]}\n\n'
     )
@@ -3171,27 +3186,32 @@ def drop_irrelevant_creators(
             + (f" — {c.why}" if c.why else "")
             for i, c in enumerate(batch, start=1)
         )
-        try:
-            client = OpenAI(api_key=openai_key, timeout=timeout)
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": RELEVANCE_SYSTEM},
-                    {"role": "user", "content": (
-                        f"The operator asked: {question}\n\n"
-                        + (f"What the account they named is actually like:\n{seed_profile}\n\n"
-                           if seed_profile else "")
-                        + _filters_to_check(filters, ctx)
-                        + f"Accounts:\n{listed}"
-                    )},
-                ],
-                temperature=0,
-                response_format={"type": "json_object"},
-            )
-            return extract_json_object(response.choices[0].message.content or "") or {}
-        except Exception as exc:
-            _log_failure("web grounding: relevance filter failed: %s", exc, exc=exc)
-            return {}
+        # One retry. A failed call keeps its whole batch unjudged, so a single
+        # timeout let a yacht charter and a tour operator through while the
+        # pages in the other batches were dropped.
+        for attempt in (1, 2):
+            try:
+                client = OpenAI(api_key=openai_key, timeout=timeout)
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": RELEVANCE_SYSTEM},
+                        {"role": "user", "content": (
+                            f"The operator asked: {question}\n\n"
+                            + (f"What the account they named is actually like:\n{seed_profile}\n\n"
+                               if seed_profile else "")
+                            + _filters_to_check(filters, ctx)
+                            + f"Accounts:\n{listed}"
+                        )},
+                    ],
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                return extract_json_object(response.choices[0].message.content or "") or {}
+            except Exception as exc:
+                _log_failure("web grounding: relevance filter failed (attempt %d of 2): %s",
+                             attempt, exc, exc=exc)
+        return {}
 
     # Judged in batches. Every scraped author now reaches this list, and one
     # call over a hundred and twenty lines drifted: "no brands or shops" let
@@ -3473,6 +3493,11 @@ def creators_from_post_authors(
         # radio station from a comedian, and correctly keeps both.
         #
         # It is also what the operator sees, in place of "posts in this niche".
+        # The bio is how a nickname is told from a page. The caption was
+        # already here; the bio was being discarded in the TikTok mapper.
+        bio = " ".join(str(meta.get("author_bio") or "").split())
+        if bio:
+            why.append(f"bio: \u201c{bio[:160]}\u201d")
         caption = str(
             getattr(item, "body", "") or getattr(item, "snippet", "") or ""
         ).strip().replace("\n", " ")
