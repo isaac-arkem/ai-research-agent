@@ -69,6 +69,7 @@ Return JSON only:
 - exclude_accounts: ONLY accounts they explicitly said to leave out of the results ("not like @x", "exclude @y", "no @z").
 - window_days: "last 30 days" -> 30, "this week" -> 7.
 - requirements: every other condition on the results, short and in their words: "no brands or shops", "women only", "posts in Arabic", "no fan pages". A condition already captured by a field above is NOT repeated here: "smaller UK artists" is countries + max_followers, "exclude celebrities" is max_followers — nothing more to add.
+- "include brands", "brand accounts too", "pages as well", "add the shops" IS a requirement. Brands and pages are left out unless the operator asks for them, so asking for them is a condition on the results. Write it in their words. A request that never mentions them does not get this line.
 
 THE CONVERSATION DECIDES WHAT IS STILL IN FORCE.
 - A message that continues the same request keeps every earlier filter it does not change. "same music style", "instagram", "yes", "look for more" change nothing — carry everything.

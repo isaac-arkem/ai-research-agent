@@ -3500,6 +3500,20 @@ def _c(name, handle, why):
     return Creator(name=name, handle=handle, platform="tiktok", why=why)
 
 
+def test_a_creator_list_drops_pages_unless_they_were_asked_for():
+    """Brands and pages ride in on the hashtag. They stay out unless the
+    operator asked for them; a persona is still a person."""
+    from app.services.grounding import RELEVANCE_SYSTEM, RESPOND_SYSTEM
+
+    assert "PEOPLE, NOT PAGES" in RELEVANCE_SYSTEM
+    assert "even when the bio" in RELEVANCE_SYSTEM
+    assert "AKTRAVELS" in RELEVANCE_SYSTEM
+    assert "The Digital Nomad Guy" in RELEVANCE_SYSTEM
+    assert "Skip it only when" in RELEVANCE_SYSTEM
+    assert "BRANDS AND PAGES STAY OUT" in RESPOND_SYSTEM
+    assert "even when the bio" in RESPOND_SYSTEM
+
+
 def test_the_filter_keeps_everything_when_it_cannot_justify_dropping():
     """A creator wrongly dropped is invisible — the operator cannot see what
     is not there, while an irrelevant one they can see and ignore."""
@@ -3515,6 +3529,33 @@ def test_the_filter_keeps_everything_when_it_cannot_justify_dropping():
     # ...and a failure costs the filtering, never the turn.
     with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")):
         assert filt(rows, "x", openai_key="sk") == rows
+
+
+def test_a_failed_batch_is_retried_once_before_it_is_kept_unjudged():
+    """A timed-out batch kept all thirty accounts unjudged — a yacht charter
+    and a tour operator among them — while the other batches were filtered."""
+    from app.services.grounding import drop_irrelevant_creators as filt
+
+    rows = [_c("Tukitini", "tuki.tini", "Private Yacht Charters"),
+            _c("Dan Ballance", "danballance1", "I'm finally living a life I dreamed of")]
+    payload = '{"drop": [{"n": 1, "why": "page, not a person"}]}'
+    with patch("app.services.grounding.OpenAI",
+               side_effect=[RuntimeError("timeout"), _triage(payload)]) as made:
+        kept = filt(rows, "digital nomads in thailand", openai_key="sk")
+    assert [c.handle for c in kept] == ["danballance1"]
+    assert made.call_count == 2
+    # Two failures still cost only the filtering, never the turn.
+    with patch("app.services.grounding.OpenAI", side_effect=RuntimeError("boom")) as made:
+        assert filt(rows, "x", openai_key="sk") == rows
+    assert made.call_count == 2
+
+
+def test_only_what_an_account_says_about_itself_shows_a_page():
+    from app.services.grounding import RELEVANCE_SYSTEM
+
+    assert "Nothing else is evidence of a page" in RELEVANCE_SYSTEM
+    assert "is a person speaking as themselves" in RELEVANCE_SYSTEM
+    assert '"Jasper"' in RELEVANCE_SYSTEM
 
 
 def test_the_filter_drops_only_what_the_model_named():
@@ -3561,6 +3602,41 @@ def test_a_scraped_creator_carries_what_it_posts():
     creator = creators_from_post_authors([cand])[0]
     assert "925,600 followers" in creator.why
     assert "Tune in weekdays 6am" in creator.why
+
+    named = schema.SourceItem(
+        item_id="j", source="tiktok", title="", body="I moved to Bangkok",
+        url="u", author="twobeers", container="", published_at="",
+        date_confidence="", engagement={}, relevance_hint="", why_relevant="",
+        snippet="", metadata={
+            "author_fans": 76, "hashtags": [],
+            "author_bio": "Alex, filming the move.\nTwo of us, one backpack.",
+        },
+    )
+    named_cand = schema.Candidate(
+        candidate_id="d", item_id="j", source="tiktok", title="", url="u",
+        snippet="", subquery_labels=[], native_ranks={}, local_relevance=0.0,
+        freshness=0.0, engagement={}, source_quality=0.0, rrf_score=0.0,
+    )
+    named_cand.source_items = [named]
+    with_bio = creators_from_post_authors([named_cand])[0]
+    assert "bio:" in with_bio.why
+    assert "Alex, filming the move. Two of us, one backpack." in with_bio.why
+    assert "I moved to Bangkok" in with_bio.why
+
+
+def test_the_tiktok_bio_is_kept_from_the_actor_payload():
+    """authorMeta.signature is the account describing itself. A nickname
+    cannot be told from a page without it."""
+    from app.services.research.engine.apify_social import _map_tiktok_item
+
+    mapped = _map_tiktok_item(
+        {"id": "1", "text": "hi", "authorMeta": {
+            "name": "twobeers", "nickName": "2 Beers",
+            "signature": "Alex, filming the move.",
+        }},
+        "thailand",
+    )
+    assert mapped["author_bio"] == "Alex, filming the move."
 
 
 # --------------------------------------------------------------------------
@@ -4651,3 +4727,20 @@ def test_the_same_person_check_falls_back_to_the_old_behaviour():
                                         settings=_settings()) is False
     with patch("app.services.grounding.OpenAI", return_value=_triage('{"oops": 1}')):
         assert _means_someone_on_screen("x", ["Isaac Kusi"], shown, settings=_settings()) is True
+
+
+def test_the_instagram_display_name_is_kept_from_the_actor_payload():
+    """Instagram fills the same keys as TikTok, so a page and a person are
+    judged on the same evidence whichever platform was scraped."""
+    from app.services.research.engine.apify_social import (
+        _INSTAGRAM_FIELDS, _map_instagram_item,
+    )
+
+    assert "ownerFullName" in _INSTAGRAM_FIELDS.split(",")
+    mapped = _map_instagram_item(
+        {"id": "1", "caption": "hi", "ownerUsername": "jenstockwell_",
+         "ownerFullName": "Jen Stockwell"},
+        "thailand",
+    )
+    assert mapped["author_nickname"] == "Jen Stockwell"
+    assert _map_instagram_item({"id": "2"}, "thailand")["author_nickname"] == ""

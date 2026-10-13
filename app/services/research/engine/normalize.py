@@ -495,6 +495,7 @@ def _normalize_shortform_video(
             "author_fans": item.get("author_fans"),
             "author_verified": item.get("author_verified"),
             "author_nickname": item.get("author_nickname") or "",
+            "author_bio": item.get("author_bio") or "",
             "top_comments": _remap_comments(
                 item.get("top_comments") or [],
                 # Instagram comments use comment_like_count as the vote field

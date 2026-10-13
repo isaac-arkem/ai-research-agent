@@ -158,6 +158,10 @@ def test_countries_and_requirements_become_a_checklist_in_names():
     assert "Must NOT be based in: Pakistan" in text
     assert "- no brands or shops" in text
     assert "no evidence is not a failure" in text
+    assert "permission to keep them" in text
+    # Passing the country check kept a holiday seller and a café: "plainly
+    # passes -> keep it" overrode the people-not-pages rule.
+    assert "Passing a filter never keeps an account the rules above drop" in text
 
 
 def test_only_the_operators_requirements_are_labelled_never_a_country():
