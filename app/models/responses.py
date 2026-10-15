@@ -10,6 +10,8 @@ from .domain import (
     Hashtag,
     ComparisonBasis,
     MarketFinding,
+    Concept,
+    ResearchBrief,
     ResearchPlan,
     WebFinding,
 )
@@ -79,6 +81,11 @@ class AskResponse(BaseModel):
     comparison_bases: Optional[List[ComparisonBasis]] = None
     searched_for: Optional[str] = None
     awaiting_approval: Optional[bool] = None
+    # A content brief read into research tracks, for the operator to approve.
+    # Present only on the turn that uploaded the brief; nothing was searched.
+    research_brief: Optional[ResearchBrief] = None
+    # A brief track's results, read into the kinds of people they describe.
+    concepts: Optional[List[Concept]] = None
 
 
 class ErrorResponse(BaseModel):

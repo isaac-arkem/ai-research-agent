@@ -7,3 +7,6 @@ python-dotenv>=1.0.0
 supabase>=2.0.0
 httpx>=0.27.0
 pytest>=8.0.0
+# Content briefs: text out of uploaded PDF and Word files.
+pypdf>=5.0
+python-docx>=1.1

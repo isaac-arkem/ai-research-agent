@@ -88,6 +88,9 @@ def get_config(settings: Any = None) -> Dict[str, Any]:
         # already forced — this is kept so the flag behaves as documented if
         # one is ever added.
         "SOCIAL_PROVIDER": "apify" if apify else None,
+        "RELIEFWEB_APPNAME": getattr(settings, "reliefweb_appname", None),
+        "TELEGRAM_MAX_CHANNELS": getattr(settings, "telegram_max_channels", None),
+        "TELEGRAM_MAX_POSTS": getattr(settings, "telegram_max_posts", None),
     }
     return {k: v for k, v in config.items() if v is not None}
 

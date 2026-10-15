@@ -476,6 +476,9 @@ class WebContext:
     # The operator's filters as applied to this answer. Stored with it, so
     # the next message's reading starts from them (app/services/filters.py).
     filters: dict = field(default_factory=dict)
+    # The sources before _trim cut them for display and storage — read by the
+    # concepts step on a brief track's turn. Never returned or stored.
+    source_texts: List[WebFinding] = field(default_factory=list)
     # The comparison this answer was for — which accounts, compared how —
     # stored with it so a follow-up about the same accounts is not asked
     # "similar in which way?" again.
@@ -1562,6 +1565,7 @@ Rules for hashtags:
 PROFILE_URLS = {
     "tiktok": "https://www.tiktok.com/@{handle}",
     "instagram": "https://www.instagram.com/{handle}/",
+    "telegram": "https://t.me/{handle}",
 }
 
 
@@ -3427,7 +3431,9 @@ def creators_from_post_authors(
     for candidate in candidates:
         item = _post_of(candidate)
         source = (getattr(item, "source", "") or "").strip().lower()
-        if source not in ("instagram", "tiktok"):
+        # A public Telegram channel is an account to follow too — it only
+        # appears when the operator asked for Telegram.
+        if source not in ("instagram", "tiktok", "telegram"):
             continue
         handle = (getattr(item, "author", "") or "").strip().lstrip("@")
         if not handle:
@@ -3478,7 +3484,7 @@ def creators_from_post_authors(
             continue
 
         verified = bool(meta.get("author_verified"))
-        nickname = str(meta.get("author_nickname") or "").strip()
+        nickname = str(meta.get("author_nickname") or meta.get("display_name") or "").strip()
         why = []
         if engagement_rate is not None:
             why.append(f"{engagement_rate * 100:.1f}% engagement on {source}")
@@ -3937,6 +3943,22 @@ def seed_signals(
     return tags, note, profile
 
 
+def _chosen_lanes(filters_job, settings) -> List[str]:
+    """The engine lanes for the sources the operator chose, or [] when they
+    chose none. The filters are read while the turn is triaged, so they are
+    almost always ready; a slow read does not hold the search for long."""
+    if filters_job is None or not getattr(settings, "filters_apply_enabled", False):
+        return []
+    found = _filters_from(filters_job, timeout=10.0)
+    if found is None or not getattr(found, "sources", None):
+        return []
+    from app.services.research import orchestrator
+
+    lanes = orchestrator.lanes_for(found.sources)
+    logger.info("web grounding: operator chose sources %s -> lanes %s", found.sources, lanes)
+    return lanes
+
+
 def _research_via_engine(
     *,
     prompt: str,
@@ -3972,8 +3994,13 @@ def _research_via_engine(
         model = getattr(settings, "research_plan_model", "gpt-4o")
         started = time.perf_counter()
 
+        # Where they asked to search, when they chose ("only Reddit", "the
+        # news and Telegram"). Empty when they did not — the engine picks its
+        # sources from every free lane, and paid lanes need the platform named.
+        chosen = _chosen_lanes(filters_job, settings)
         plan = orchestrator.plan_for(
             query.text, provider=client, model=model,
+            sources=chosen or None,
             depth=getattr(settings, "research_depth", "default"),
             # The planner writes better subqueries when it knows what the
             # answer has to BE. Left unsaid, a market question retrieves
@@ -4006,11 +4033,16 @@ def _research_via_engine(
         # so "on the gram" stopped the question being asked and then left
         # Instagram shut anyway — the worst of both.
         lanes = _spend_lanes(prompt, query.text, platform)
-        plan = _fan_out_web_plan(
-            plan, query.text,
-            typed_tags or re.findall(r"#(\w+)", query.text or ""),
-            lanes,
-        )
+        # A paid platform they chose as a source is a platform they named.
+        lanes += [lane for lane in chosen
+                  if lane in orchestrator.PAID_LANES and lane not in lanes]
+        if not chosen or "grounding" in chosen:
+            # Extra web searches per tag — not when they kept the web out.
+            plan = _fan_out_web_plan(
+                plan, query.text,
+                typed_tags or re.findall(r"#(\w+)", query.text or ""),
+                lanes,
+            )
         seed_note = None
         # Not the ones they asked NOT to be like. @_zinatubako was swept for
         # hashtags on a turn that said "but not like @_zinatubako", and its
@@ -4212,6 +4244,7 @@ def _research_via_engine(
         action="search",
         query=query.text,
         findings=[_trim(f) for f in findings],
+        source_texts=list(findings),
         creators=creators,
         hashtags=hashtags,
         markets=markets,
@@ -5031,6 +5064,7 @@ def gather_web_context(
         action="search",
         query=query.text,
         findings=[_trim(f) for f in findings],
+        source_texts=list(findings),
         creators=creators,
         hashtags=hashtags,
         markets=markets,

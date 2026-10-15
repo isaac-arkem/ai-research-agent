@@ -35,13 +35,16 @@ from app.services.research.engine import (
     grounding as web,
     hackernews,
     instagram,
+    news,
     normalize,
     planner,
     polymarket,
     reddit,
+    reliefweb,
     rerank,
     schema,
     signals,
+    telegram_public,
     tiktok,
 )
 
@@ -213,6 +216,21 @@ def _lane_web(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict) -> Li
     return items
 
 
+def _lane_news(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict) -> List[dict]:
+    # The operator's question, like the web lane: Tavily reads intent better
+    # than the planner's keyword rewrite.
+    return news.search_news(opts.get("raw_topic") or q, fd, td, cfg)
+
+
+def _lane_reports(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict) -> List[dict]:
+    # ReliefWeb is a keyword index: the planner's keyword query suits it.
+    return reliefweb.search_reports(q, fd, td, cfg)
+
+
+def _lane_telegram(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict) -> List[dict]:
+    return telegram_public.search_telegram(q, fd, td, cfg)
+
+
 # The engine calls the web source "grounding"; the plan's source names have to
 # match, so the key does too. `web` is the alias a caller is likely to write.
 LANES: Dict[str, Callable[..., List[dict]]] = {
@@ -223,12 +241,68 @@ LANES: Dict[str, Callable[..., List[dict]]] = {
     "polymarket": _lane_polymarket,
     "grounding": _lane_web,
     "web": _lane_web,
+    "news": _lane_news,
+    "reports": _lane_reports,
+    "telegram": _lane_telegram,
 }
 
 # What the planner is allowed to route to. Anything absent here it will never
 # put in a subquery, which is how a source we cannot serve stays out of a plan
 # instead of failing at fan-out time.
-AVAILABLE_SOURCES = ["grounding", "reddit", "hackernews", "instagram", "tiktok", "polymarket"]
+AVAILABLE_SOURCES = [
+    "grounding", "reddit", "hackernews", "instagram", "tiktok", "polymarket",
+    # Free like Reddit: the planner may use them on any question. Paid lanes
+    # still run only when the operator names the platform (paid_lane_allowed).
+    "news", "reports", "telegram",
+]
+
+# Free lanes the planner does not reach for on its own: they run only when the
+# operator names them ("search Hacker News", "check Polymarket"). On creator
+# and recruitment questions they returned tech threads and betting markets
+# that outranked the web and news results — 10 of the top 20 on one run.
+NAMED_ONLY_SOURCES = frozenset({"hackernews", "polymarket"})
+
+# Lanes that need a setting before they can answer, and the config key that
+# turns each one on. Left out of a plan until configured, so an unset key is
+# not recorded as a failure on every search.
+NEEDS_CONFIG = {"reports": "RELIEFWEB_APPNAME"}
+
+
+def default_sources(config: Optional[dict] = None) -> List[str]:
+    """The sources the planner may choose from when the operator chose none."""
+    if config is None:
+        from app.services.research.engine import env
+
+        config = env.get_config()
+    return [
+        source for source in AVAILABLE_SOURCES
+        if source not in NAMED_ONLY_SOURCES
+        and (source not in NEEDS_CONFIG or (config.get(NEEDS_CONFIG[source]) or "").strip())
+    ]
+
+# What an operator can name, in their words, mapped to the lane that serves
+# it. "web" is the engine's "grounding".
+CHOOSABLE_SOURCES = {
+    "web": "grounding",
+    "reddit": "reddit",
+    "hackernews": "hackernews",
+    "polymarket": "polymarket",
+    "tiktok": "tiktok",
+    "instagram": "instagram",
+    "news": "news",
+    "reports": "reports",
+    "telegram": "telegram",
+}
+
+
+def lanes_for(chosen) -> List[str]:
+    """The engine lanes for the sources an operator chose, in their order."""
+    out: List[str] = []
+    for name in chosen or ():
+        lane = CHOOSABLE_SOURCES.get(str(name).strip().lower())
+        if lane and lane not in out:
+            out.append(lane)
+    return out
 
 # Which lanes can answer each kind of question.
 #
@@ -243,7 +317,9 @@ AVAILABLE_SOURCES = ["grounding", "reddit", "hackernews", "instagram", "tiktok",
 # What answers "which country" is a market report, a ranking, a per-country
 # breakdown — the web lane, with discussion as a secondary read.
 SOURCES_FOR_ANSWER = {
-    "markets": ["grounding", "reddit", "hackernews"],
+    # Hacker News is named-only now (NAMED_ONLY_SOURCES); reports and news are
+    # what compare countries alongside the web.
+    "markets": ["grounding", "reddit", "news"],
 }
 
 # Lanes that cost money per call. Everything else is keyless or flat-rate.
@@ -253,6 +329,11 @@ PAID_LANES = frozenset({"instagram", "tiktok"})
 # one of these still finds something new with its own phrase; on the others a
 # second job could only repeat the first.
 PHRASE_SEARCH_LANES = frozenset({"tiktok"})
+
+# Free lanes that run once per request, not once per subquery. News asks the
+# operator's own question, so a second subquery would send the identical
+# search; Telegram reads whole channels, so a second pass mostly re-reads them.
+ONCE_PER_REQUEST_LANES = frozenset({"news", "telegram"})
 
 # The per-request targeting every job on a lane would otherwise repeat.
 _TARGETING_KEYS = frozenset({"hashtags", "tiktok_hashtags", "tiktok_creators", "ig_creators"})
@@ -323,7 +404,7 @@ def plan_for(
     """
     # An explicit `sources` wins; otherwise the answer shape narrows the pool
     # to the lanes that can actually answer it.
-    available = list(sources or SOURCES_FOR_ANSWER.get(answer or "", AVAILABLE_SOURCES))
+    available = list(sources or SOURCES_FOR_ANSWER.get(answer or "") or default_sources())
     if not (provider and model):
         return planner.plan_query(
             topic=topic, available_sources=available, requested_sources=None,
@@ -606,6 +687,11 @@ def run_research(
                     "not scraped — no platform named in the request",
                 ))
                 continue
+            if source in ONCE_PER_REQUEST_LANES and source in paid_started:
+                outcomes.append(LaneOutcome(
+                    source, "skipped", 0, "already searched for this request",
+                ))
+                continue
             phrases_only = False
             if source in PAID_LANES and source in paid_started:
                 if source not in PHRASE_SEARCH_LANES:
@@ -617,7 +703,7 @@ def run_research(
                     ))
                     continue
                 phrases_only = True
-            if source in PAID_LANES:
+            if source in PAID_LANES or source in ONCE_PER_REQUEST_LANES:
                 paid_started.add(source)
             jobs.append((source, subquery, phrases_only))
 

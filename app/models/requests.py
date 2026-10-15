@@ -3,7 +3,7 @@
 from typing import List, Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.utils.guards import MAX_PROMPT_LENGTH
 
@@ -21,6 +21,18 @@ class ChatMessage(BaseModel):
     content: str = Field(min_length=1, max_length=MAX_HISTORY_CONTENT)
 
 
+# A 3 MB file is about 4 MB once base64-encoded.
+MAX_BRIEF_BASE64 = 4_100_000
+
+
+class BriefUpload(BaseModel):
+    """A content brief the operator uploaded. Read into a request, then the
+    turn runs exactly as if they had typed it."""
+
+    filename: str = Field(min_length=1, max_length=255)
+    content_base64: str = Field(min_length=1, max_length=MAX_BRIEF_BASE64)
+
+
 class AskRequest(BaseModel):
     prompt: str = Field(
         min_length=1,
@@ -36,12 +48,33 @@ class AskRequest(BaseModel):
         max_length=MAX_HISTORY_TURNS,
         description="Optional client-side history. Leave empty when using conversation_id.",
     )
+    brief: Optional[BriefUpload] = Field(
+        default=None,
+        description=(
+            "A content brief file (PDF, .docx, .txt, .md). The turn reads it into research "
+            "tracks for approval and searches nothing. `prompt` is then an optional note on it."
+        ),
+    )
+    track: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="The research-brief track this question runs, so the thread keeps its group.",
+    )
 
     model_config = {
         "json_schema_extra": {
             "example": {"prompt": "Find modest fashion creators in Saudi Arabia"}
         }
     }
+
+    @model_validator(mode="before")
+    @classmethod
+    def a_brief_may_come_without_a_note(cls, data):
+        # A brief on its own is a complete request; its note is optional. Without
+        # a brief, `prompt` keeps exactly the rules it always had.
+        if isinstance(data, dict) and data.get("brief") and not str(data.get("prompt") or "").strip():
+            return {**data, "prompt": " "}
+        return data
 
     @field_validator("conversation_id", mode="before")
     @classmethod

@@ -166,6 +166,15 @@ class Settings(BaseSettings):
     # `apify_supported_countries` (see sql/002_apify_supported_countries.sql).
     apify_token: Optional[str] = None
     apify_tiktok_actor: str = "clockworks~tiktok-scraper"
+
+    # Free sources the planner may use on any question: "news", "reports",
+    # "telegram". ReliefWeb (reports) only answers an approved appname, and is
+    # left out until one is set: https://apidoc.reliefweb.int/parameters#appname
+    reliefweb_appname: Optional[str] = None
+    # Public Telegram channels read per request, each one page of recent posts.
+    telegram_max_channels: int = 5
+    # Posts kept per request, the ones closest to the question.
+    telegram_max_posts: int = 20
     # One Apify run to tell a real account from a fan account when the web
     # search returns rivals it cannot separate. Only ever reached when the
     # free name-to-handle match found nothing, so the names that already

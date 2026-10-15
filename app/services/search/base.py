@@ -32,6 +32,9 @@ class SearchResult:
     # The page's text, as returned with the result. None when the provider
     # had none to give for that URL.
     content: Optional[str] = None
+    # When the page was published (YYYY-MM-DD), for providers that know —
+    # Tavily's news topic does, its general topic does not.
+    published_date: Optional[str] = None
 
 
 @dataclass
@@ -58,6 +61,15 @@ class SearchQuery:
     timeout: float = 15.0
     # Language hint for providers that accept one, e.g. "ar" for Saudi.
     language: Optional[str] = None
+    # All three unset for every existing caller, which keeps their requests
+    # exactly as they were. The news and Telegram lanes set them.
+    # Provider topic, e.g. Tavily's "news". None means the provider default.
+    topic: Optional[str] = None
+    # Published between these dates (YYYY-MM-DD), where the provider supports it.
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    # Only results from these domains.
+    include_domains: Optional[List[str]] = None
 
 
 @runtime_checkable

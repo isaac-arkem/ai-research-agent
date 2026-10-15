@@ -25,6 +25,13 @@ from app.models.responses import (
     ErrorResponse,
 )
 from app.services import conversations as conversation_service
+from app.services.brief import (
+    BriefError,
+    brief_message,
+    curate_upload,
+    read_brief_text,
+    track_message,
+)
 from app.services.agent import generate_research_plan
 from app.services.grounding import render_findings_message
 from app.services.audit import write_audit
@@ -57,6 +64,78 @@ def _rate_headers(request: Request, response: Response) -> None:
         response.headers[key] = value
 
 
+def _read_brief(req: AskRequest) -> Optional[str]:
+    """The uploaded brief's words, or None without one. A file that cannot be
+    read is the operator's to fix: 400, before anything runs or is stored."""
+    if req.brief is None:
+        return None
+    try:
+        return read_brief_text(req.brief.filename, req.brief.content_base64)
+    except BriefError as exc:
+        raise_http(400, str(exc), exc.code)
+
+
+def _user_message(req: AskRequest) -> str:
+    """What the thread stores for the operator's turn. An approved track keeps
+    its group, so the results that follow stay labelled with it."""
+    if req.track:
+        return track_message(req.track, req.prompt)
+    return req.prompt
+
+
+# A brief that could not be read into tracks: the model failed (upstream), or
+# it read the brief and found nothing to research.
+BRIEF_ERROR_HTTP = {"brief_failed": 502, "brief_no_tracks": 422}
+
+
+def _brief_turn(
+    req: AskRequest, brief_text: str, cid: str, user_id: str, settings: Settings,
+) -> AskResponse:
+    """Read the brief into research tracks for the operator to approve.
+
+    Nothing is searched on this turn: an approved track comes back as an
+    ordinary question and runs through the existing flow. Raises BriefError.
+    """
+    import time
+
+    started = time.perf_counter()
+    note = req.prompt if req.prompt.strip() else None
+    _persist_user_message(cid, user_id, brief_message(req.brief.filename, note))
+    brief = curate_upload(req.brief.filename, brief_text, note, settings=settings)
+    message_id = None
+    try:
+        message_id = conversation_service.store.add_assistant_message(
+            cid, user_id,
+            json.dumps({"research_brief": brief.model_dump()}, ensure_ascii=False),
+        )
+    except Exception as exc:
+        logger.warning("failed to persist research brief: %s", exc)
+    latency_ms = int((time.perf_counter() - started) * 1000)
+    write_audit(
+        user_id=user_id,
+        prompt=brief_message(req.brief.filename, note),
+        model=getattr(settings, "grounding_escalation_model", None) or settings.research_agent_model,
+        result=AgentResult(ok=True, latency_ms=latency_ms),
+        status_code=200,
+        conversation_id=cid,
+        message_id=message_id,
+    )
+    return AskResponse(
+        ok=True,
+        conversation_id=cid,
+        message_id=message_id,
+        latency_ms=latency_ms,
+        research_brief=brief,
+        awaiting_approval=True,
+    )
+
+
+def _thread_title(req: AskRequest) -> str:
+    if req.brief is not None:
+        return f"Brief: {req.brief.filename}"[:80]
+    return req.prompt.strip()[:80] or "Research"
+
+
 def _history_for_request(req: AskRequest, user_id: str):
     """Server store wins when conversation_id is set; otherwise client history."""
     if req.conversation_id:
@@ -65,9 +144,7 @@ def _history_for_request(req: AskRequest, user_id: str):
         if conv is None:
             raise_http(400, "Unknown conversation_id", "unknown_conversation")
         return cid, conversation_service.store.history(cid, user_id)
-    cid = conversation_service.store.create(
-        user_id, req.prompt.strip()[:80] or "Research"
-    )
+    cid = conversation_service.store.create(user_id, _thread_title(req))
     history = [
         ChatTurn(role=m.role, content=m.content) for m in req.conversation_history
     ]
@@ -135,6 +212,9 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
             if result.comparison:
                 # Read back so "more like him" keeps the basis already chosen.
                 stored["comparison"] = result.comparison
+            if result.concepts:
+                # So a reopened thread shows them again.
+                stored["concepts"] = [c.model_dump() for c in result.concepts]
             cq_json = json.dumps(stored, ensure_ascii=False)
             return conversation_service.store.add_assistant_message(
                 cid,
@@ -148,14 +228,15 @@ def _persist_assistant(cid: str, user_id: str, result: AgentResult) -> Optional[
 
 
 def _run_model(
-    req: AskRequest,
+    prompt: str,
     ctx: AgentContext,
     settings: Settings,
     history,
+    concepts_for: Optional[str] = None,
 ) -> tuple[str, AgentResult]:
     model = settings.research_agent_model
     result = generate_research_plan(
-        req.prompt,
+        prompt,
         ctx,
         openai_key=settings.openai_api_key,
         model=model,
@@ -163,6 +244,7 @@ def _run_model(
         max_tokens=settings.llm_max_tokens,
         history=history,
         settings=settings,
+        concepts_for=concepts_for,
     )
     return model, result
 
@@ -188,6 +270,7 @@ def _success_body(result: AgentResult, cid: str, message_id: Optional[str]) -> A
         comparison_bases=result.comparison_bases,
         searched_for=result.searched_for,
         awaiting_approval=result.awaiting_approval,
+        concepts=result.concepts,
     )
 
 
@@ -227,9 +310,17 @@ def ask(
     user: AuthUser = Depends(enforce_rate_limit),
 ):
     _rate_headers(request, response)
+    brief_text = _read_brief(req)
     cid, history = _history_for_request(req, user.id)
-    _persist_user_message(cid, user.id, req.prompt)
-    model, result = _run_model(req, ctx, settings, history)
+    if brief_text is not None:
+        try:
+            return _brief_turn(req, brief_text, cid, user.id, settings)
+        except BriefError as exc:
+            raise_http(BRIEF_ERROR_HTTP.get(exc.code, 502), str(exc), exc.code,
+                       conversation_id=cid)
+    _persist_user_message(cid, user.id, _user_message(req))
+    # A brief track's turn also builds concepts from its sources.
+    model, result = _run_model(req.prompt, ctx, settings, history, req.track)
     status = 200 if result.ok else ERROR_HTTP.get(result.error_code or "", 502)
     message_id = _persist_assistant(cid, user.id, result)
     write_audit(
@@ -298,8 +389,10 @@ async def ask_stream(
     have returned, so a client can ignore the rest and still be correct.
     """
 
+    brief_text = _read_brief(req)
     cid, history = _history_for_request(req, user.id)
-    _persist_user_message(cid, user.id, req.prompt)
+    if brief_text is None:
+        _persist_user_message(cid, user.id, _user_message(req))
 
     events: "queue.Queue" = queue.Queue()
 
@@ -308,6 +401,15 @@ async def ask_stream(
 
     def run() -> None:
         try:
+            if brief_text is not None:
+                on_progress("brief", detail="Reading the brief into research tracks")
+                try:
+                    body = _brief_turn(req, brief_text, cid, user.id, settings)
+                except BriefError as exc:
+                    events.put(("failed", error_body(str(exc), exc.code, conversation_id=cid)))
+                    return
+                events.put(("done", body.model_dump(exclude_none=True)))
+                return
             model = settings.research_agent_model
             result = generate_research_plan(
                 req.prompt,
@@ -319,6 +421,7 @@ async def ask_stream(
                 history=history,
                 settings=settings,
                 on_progress=on_progress,
+                concepts_for=req.track,
             )
             message_id = _persist_assistant(cid, user.id, result)
             status = 200 if result.ok else ERROR_HTTP.get(result.error_code or "", 500)

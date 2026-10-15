@@ -38,6 +38,10 @@ class Filters:
     min_followers: Optional[int] = None
     max_followers: Optional[int] = None
     platforms: List[str] = field(default_factory=list)          # tiktok | instagram
+    # Where to search, when the operator chose: "only reddit", "news and
+    # telegram". Names from orchestrator.CHOOSABLE_SOURCES. Empty: the engine
+    # decides, as it always has.
+    sources: List[str] = field(default_factory=list)
     exclude_accounts: List[str] = field(default_factory=list)   # handles, no @
     window_days: Optional[int] = None
     # Anything else the operator asked of the results, in their words:
@@ -61,11 +65,12 @@ NOT FILTERS — never write these down anywhere:
 - how to compare: "same music style", "same audience", "similar level of fame" — that is the basis of the comparison, not a condition on results.
 
 Return JSON only:
-{"countries": ["ISO-2"], "exclude_countries": ["ISO-2"], "min_followers": <int or null>, "max_followers": <int or null>, "platforms": ["tiktok"|"instagram"], "exclude_accounts": ["handle without @"], "window_days": <int or null>, "requirements": ["..."]}
+{"countries": ["ISO-2"], "exclude_countries": ["ISO-2"], "min_followers": <int or null>, "max_followers": <int or null>, "platforms": ["tiktok"|"instagram"], "sources": ["..."], "exclude_accounts": ["handle without @"], "window_days": <int or null>, "requirements": ["..."]}
 
 - countries: places the results must be in ("in Saudi Arabia", "UK artists") as ISO-2 codes. exclude_countries: places they must NOT be in ("not in Ghana", "not Ghanaians").
 - min_followers / max_followers: the size as a number. "under 100k" -> max 100000. "micro creators", "smaller artists", "not the big names" -> max 100000 unless a number is given. "exclude celebrities" -> max 1000000. "at least 10k" -> min 10000.
 - platforms: only platforms they asked for.
+- sources: only when they chose WHERE to search ("only Reddit", "search the news and Telegram", "UN and NGO reports", "just the web") — each one of: __SOURCES__. "reports" is published humanitarian, UN and NGO reports; "news" is news articles; "web" is general web search. A platform they named for creators goes in platforms; it goes in sources too only when they limited the search to it. Empty when they did not choose.
 - exclude_accounts: ONLY accounts they explicitly said to leave out of the results ("not like @x", "exclude @y", "no @z").
 - window_days: "last 30 days" -> 30, "this week" -> 7.
 - requirements: every other condition on the results, short and in their words: "no brands or shops", "women only", "posts in Arabic", "no fan pages". A condition already captured by a field above is NOT repeated here: "smaller UK artists" is countries + max_followers, "exclude celebrities" is max_followers — nothing more to add.
@@ -77,6 +82,15 @@ THE CONVERSATION DECIDES WHAT IS STILL IN FORCE.
 - A message that starts a NEW request ("who is X?", a different topic) carries nothing from before — only what it says itself.
 
 Never invent a filter nobody asked for. A request with no filters returns every field empty."""
+
+
+def _choosable() -> List[str]:
+    from app.services.research.orchestrator import CHOOSABLE_SOURCES
+
+    return list(CHOOSABLE_SOURCES)
+
+
+FILTERS_SYSTEM = FILTERS_SYSTEM.replace("__SOURCES__", ", ".join(_choosable()))
 
 
 def _turn_text(turn) -> str:
@@ -135,6 +149,7 @@ def parse_filters(parsed: dict) -> Filters:
         min_followers=_count(parsed.get("min_followers")),
         max_followers=_count(parsed.get("max_followers")),
         platforms=[p for p in _words(parsed.get("platforms"), lower=True) if p in ("tiktok", "instagram")],
+        sources=[p for p in _words(parsed.get("sources"), lower=True) if p in _choosable()],
         exclude_accounts=_words(parsed.get("exclude_accounts"), lower=True, strip_at=True),
         window_days=_count(parsed.get("window_days")),
         requirements=_words(parsed.get("requirements")),

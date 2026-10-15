@@ -271,6 +271,63 @@ class Hashtag(BaseModel):
     sources: int = 1
 
 
+class ConceptEvidence(BaseModel):
+    """A line from a numbered source that a concept rests on."""
+
+    source: int
+    quote: str
+
+
+class Concept(BaseModel):
+    """An ordinary kind of person the sources show being targeted — not a
+    scammer, not a victim's story — designed so real creators like them can
+    be found in the market. Every field is informed by the sources; one no
+    source informs stays empty."""
+
+    title: str                # "Young Ethiopian Mechanics"
+    age_range: str = ""       # informs age
+    occupation: str = ""      # informs occupation
+    job_ads: str = ""         # the job ads people like them apply to
+    market: str = ""          # the country they live in now
+    address: str = ""         # the city or area
+    ethnicity: str = ""
+    home_country: str = ""    # the country they are from — the search's place
+    # The soul concept: what drives them, what they post about, their limits.
+    motivations: str = ""
+    interests: str = ""
+    boundaries: str = ""
+    evidence: List[ConceptEvidence] = Field(default_factory=list)
+    # What Find creators searches: who they are — ethnicity, job, age. Built
+    # from the fields above in code (concepts.creator_search).
+    creator_search: str = ""
+
+
+class ResearchTrack(BaseModel):
+    """One line of research a content brief asks for. Everything in it is read
+    out of the brief — the group, the places, the languages — never supplied
+    by the code."""
+
+    group: str
+    # The request the existing flow runs when the operator approves the track.
+    question: str
+    countries: List[str] = Field(default_factory=list)
+    languages: List[str] = Field(default_factory=list)
+    platforms: List[str] = Field(default_factory=list)
+    # What a creator or post must show to count for this track.
+    inclusion: List[str] = Field(default_factory=list)
+
+
+class ResearchBrief(BaseModel):
+    """A content brief, read into research tracks for the operator to approve
+    before anything is searched."""
+
+    filename: str
+    summary: str = ""
+    tracks: List[ResearchTrack] = Field(default_factory=list)
+    # What the research needs and the brief does not say.
+    gaps: List[str] = Field(default_factory=list)
+
+
 class Creator(BaseModel):
     """A creator lifted out of a search result's page text.
 
@@ -372,6 +429,8 @@ class AgentResult(BaseModel):
     # The comparison a search turn answered (accounts + basis). Stored with
     # the turn, never shown; a follow-up about the same accounts reuses it.
     comparison: Optional[dict] = None
+    # Concepts built from a research-brief track's sources.
+    concepts: Optional[List[Concept]] = None
     validation: Optional[ValidationResult] = None
     raw: Optional[str] = None
     error: Optional[str] = None

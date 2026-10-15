@@ -117,6 +117,7 @@ def generate_research_plan(
     history: Optional[Sequence[ChatTurn]] = None,
     settings=None,
     on_progress=None,
+    concepts_for: Optional[str] = None,
 ) -> AgentResult:
     started = time.perf_counter()
 
@@ -226,13 +227,47 @@ def generate_research_plan(
             # as cards. The fenced copy the planner reads next turn is written
             # into the conversation by the endpoint, not shown here — the
             # operator should never see the markers.
+            #
+            # A research-brief track also gets concepts: the kinds of people
+            # its sources describe, each a creator search of its own. Read
+            # from the full source text, before it was cut for display.
+            concepts = None
+            findings = web.findings
+            if concepts_for:
+                from app.services import concepts as concept_service
+                from app.services.grounding import _trim
+
+                concept_model = getattr(settings, "grounding_escalation_model", None) or model
+                sources = list(web.source_texts or web.findings)
+                # The search named regions; cover them one country at a time,
+                # so the concepts can say which country, not just the region.
+                if on_progress:
+                    on_progress("concepts", detail="Searching each country for more sources")
+                searches = concept_service.country_searches(
+                    sanitized, concepts_for, openai_key=openai_key, model=concept_model,
+                )
+                extra = concept_service.more_sources(
+                    searches, sources, search_api_key=getattr(settings, "search_api_key", "") or "",
+                )
+                room = max(0, concept_service.MAX_CONCEPT_SOURCES - len(sources))
+                extra = extra[:room]
+                sources += extra
+                # Shown with the turn's other sources, in the same order, so a
+                # concept's evidence number points at the right card.
+                findings = list(web.findings) + [_trim(f) for f in extra]
+                if on_progress:
+                    on_progress("concepts_build", detail=f"Building concepts from {len(sources)} sources")
+                concepts = concept_service.build_concepts(
+                    sanitized, concepts_for, sources,
+                    openai_key=openai_key, model=concept_model,
+                )
             return AgentResult(
                 ok=True,
                 plan=None,
                 clarifying_question=review_question_for(web),
                 understood_so_far=summarise_findings(web),
                 missing_fields=[],
-                findings=web.findings,
+                findings=findings,
                 creators=web.creators,
                 hashtags=web.hashtags,
                 markets=web.markets,
@@ -240,6 +275,7 @@ def generate_research_plan(
                 searched_for=web.query,
                 filters=web.filters or None,
                 comparison=web.comparison or None,
+                concepts=concepts,
                 awaiting_approval=True,
                 latency_ms=int((time.perf_counter() - started) * 1000),
             )

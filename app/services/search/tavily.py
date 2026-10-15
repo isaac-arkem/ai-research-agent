@@ -86,13 +86,19 @@ class TavilyProvider:
             "query": query.text,
             "max_results": max(1, min(query.limit, MAX_RESULTS)),
             "search_depth": self.search_depth,
-            "topic": "general",
+            "topic": query.topic or "general",
         }
         # Geo-targeting is by name, and only honoured when topic is general.
         if query.country_name:
             body["country"] = query.country_name.strip().lower()
         if (query.window or "") in _VALID_WINDOWS:
             body["time_range"] = query.window
+        if query.start_date:
+            body["start_date"] = query.start_date
+        if query.end_date:
+            body["end_date"] = query.end_date
+        if query.include_domains:
+            body["include_domains"] = list(query.include_domains)
         if self.include_content:
             # markdown keeps structure; lists of hashtags survive better than
             # they do in flattened plain text.
@@ -181,9 +187,26 @@ def _collect_results(body: dict, limit: int) -> List[SearchResult]:
                 description=row.get("content") or "",
                 # None when include_raw_content was off — callers fall back
                 content=row.get("raw_content") or None,
+                published_date=_day(row.get("published_date")),
             )
         )
     return out
+
+
+def _day(value) -> Optional[str]:
+    """YYYY-MM-DD from Tavily's published_date, which is an RFC-style date
+    string on the news topic and absent on the general one."""
+    if not value:
+        return None
+    from email.utils import parsedate_to_datetime
+
+    text = str(value).strip()
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+    try:
+        return parsedate_to_datetime(text).date().isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
 def health_check(provider: TavilyProvider, canary: str = "wikipedia") -> ProviderHealth:

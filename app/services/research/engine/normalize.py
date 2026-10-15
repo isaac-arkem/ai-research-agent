@@ -70,6 +70,9 @@ def normalize_source_items(
         "trustpilot": _normalize_trustpilot,
         "amazon": _normalize_amazon,
         "grounding": _normalize_grounding,
+        # Articles and reports carry the same fields as a web page.
+        "news": _normalize_grounding,
+        "reports": _normalize_grounding,
         "xiaohongshu": _normalize_grounding,
         "github": _normalize_github,
         "perplexity": _normalize_grounding,
@@ -606,7 +609,12 @@ def _normalize_microblog(
         engagement=item.get("engagement") or {},
         relevance_hint=item.get("relevance", 0.5),
         why_relevant=str(item.get("why_relevant") or ""),
-        metadata={"display_name": item.get("display_name")},
+        metadata={
+            "display_name": item.get("display_name"),
+            # The account's audience when the source gives one (a Telegram
+            # channel's subscribers). None for the rest, as before.
+            "author_fans": item.get("subscribers"),
+        },
     )
 
 
