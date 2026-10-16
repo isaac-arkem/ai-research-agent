@@ -165,7 +165,9 @@ def _lane_instagram(q: str, fd: str, td: str, depth: str, cfg: dict, opts: dict)
     # real tags cost the same single run as one. Taking hashtags[0] threw the
     # rest away, and the resolver orders them most specific first, which is
     # the one likeliest to have no posts behind it.
-    hashtags = opts.get("hashtags") or []
+    # Instagram's own weighed tags when there are some (see
+    # grounding._instagram_tags_worth_scraping); the shared list otherwise.
+    hashtags = opts.get("instagram_hashtags") or opts.get("hashtags") or []
     result = instagram.search_and_enrich(
         hashtags[0] if hashtags else q, fd, td, depth=depth, token="",
         ig_creators=opts.get("ig_creators"),
@@ -336,7 +338,7 @@ PHRASE_SEARCH_LANES = frozenset({"tiktok"})
 ONCE_PER_REQUEST_LANES = frozenset({"news", "telegram"})
 
 # The per-request targeting every job on a lane would otherwise repeat.
-_TARGETING_KEYS = frozenset({"hashtags", "tiktok_hashtags", "tiktok_creators", "ig_creators"})
+_TARGETING_KEYS = frozenset({"hashtags", "tiktok_hashtags", "tiktok_creators", "ig_creators", "instagram_hashtags"})
 
 
 def paid_lane_allowed(source: str, named_platforms) -> bool:
@@ -482,9 +484,14 @@ whole job. The Instagram and TikTok lanes search a hashtag literally, so a tag
 has to be one real community uses, not a description of the topic compressed
 into one word.
 
-  topic "modest fashion creators Saudi Arabia"
-    GOOD: ["modestfashion", "saudifashion", "abaya", "hijabstyle"]
-    BAD:  ["modestfashioncreatorssaudiarabia"]   <- nobody posts under this
+  topic "<niche> creators <country>"
+    GOOD: ["<niche>", "<country><niche>", "<the niche's own word>", "<country>"]
+    BAD:  ["<niche>creators<country>"]   <- nobody posts under this
+
+The example only shows the FORMAT. Never take its niche: when the topic does
+not say what the accounts post about, do not invent a niche — return only tags
+for the place or community the topic names. A niche nobody asked for sends the
+scrape after the wrong people.
 
 Prefer short established tags over long specific ones, and include the local
 or market-specific tag when the topic names a place. A market rarely has its

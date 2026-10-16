@@ -482,3 +482,15 @@ def test_a_name_the_operator_typed_is_never_second_guessed():
 def test_the_same_account_needs_no_decision():
     asked, kw = _more_like("find more creators like him", ["khaby.lame"], True)
     assert not asked.called and kw["seeds"] == ["khaby.lame"]
+
+
+def test_a_question_about_someone_on_screen_does_not_inherit_a_comparison():
+    """"does he have an instagram account?" after "creators similar to him"
+    became a hunt for others like him, with a paid Instagram scrape."""
+    kw = _after_a_comparison("about_results")
+    assert kw["seeds"] == [] and kw["subjects"] == ["Sarkodie"]
+
+
+def test_carrying_the_research_on_still_inherits_it():
+    kw = _after_a_comparison("continues_research")
+    assert kw["seeds"] == ["Sarkodie"]

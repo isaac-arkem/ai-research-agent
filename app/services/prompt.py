@@ -9,6 +9,7 @@
 # The user message wraps the operator's question in a safety fence
 # so the AI treats it as data, not as instructions.
 
+import json
 from typing import Dict, List, Optional, Sequence, Union
 
 from app.models.domain import AgentContext, ChatTurn
@@ -539,6 +540,28 @@ def build_user_message(sanitized_prompt: str, *, is_followup: bool = False) -> s
     )
 
 
+# Stored on a search turn for the console to render as cards, and already in
+# the turn's `web_results` text for the planner — which reads that instead.
+# Sent as well, the duplicates took one session to ~116k tokens and over the
+# model's limit ("Upstream failed"). What is stored and shown is unchanged.
+SCREEN_ONLY_KEYS = ("findings", "creators", "concepts")
+
+
+def _for_planner(content: str) -> str:
+    """An assistant turn as the planner reads it: without the screen-only
+    copies. A turn without them is passed through exactly as stored."""
+    if not content.lstrip().startswith("{"):
+        return content
+    try:
+        stored = json.loads(content)
+    except ValueError:
+        return content
+    if not isinstance(stored, dict) or not any(k in stored for k in SCREEN_ONLY_KEYS):
+        return content
+    return json.dumps({k: v for k, v in stored.items() if k not in SCREEN_ONLY_KEYS},
+                      ensure_ascii=False)
+
+
 def build_chat_messages(
     system_prompt: str,
     sanitized_prompt: str,
@@ -555,7 +578,7 @@ def build_chat_messages(
         if role == "user":
             messages.append({"role": "user", "content": content})
         else:
-            messages.append({"role": "assistant", "content": content})
+            messages.append({"role": "assistant", "content": _for_planner(content)})
     has_history = len(messages) > 1
     messages.append({"role": "user", "content": build_user_message(sanitized_prompt, is_followup=has_history)})
     return messages

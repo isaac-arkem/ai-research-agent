@@ -165,15 +165,15 @@ def test_telegram_finds_channels_then_reads_them():
     assert [i["handle"] for i in items] == ["jobsbkk"]
 
 
-def test_a_telegram_channel_becomes_an_account_card():
+def test_a_telegram_channel_is_evidence_not_a_creator_card():
+    """Its channels were a university club, a shop and an association —
+    the only "creators" in a search for people."""
     from app.services.grounding import creators_from_post_authors
 
     items = normalize.normalize_source_items(
         "telegram", telegram_public.parse_preview(PREVIEW, "jobsbkk"), "2025-01-01", "2025-12-31")
-    creator = creators_from_post_authors(items)[0]
-    assert (creator.handle, creator.platform, creator.name) == ("jobsbkk", "telegram", "Jobs & Work")
-    assert creator.profile_url == "https://t.me/jobsbkk"
-    assert creator.followers == 12500
+    assert items                                   # still sources
+    assert creators_from_post_authors(items) == []  # never cards
 
 
 # ── choosing sources ────────────────────────────────────────────────

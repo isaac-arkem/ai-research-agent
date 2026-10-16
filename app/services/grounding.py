@@ -3431,9 +3431,11 @@ def creators_from_post_authors(
     for candidate in candidates:
         item = _post_of(candidate)
         source = (getattr(item, "source", "") or "").strip().lower()
-        # A public Telegram channel is an account to follow too — it only
-        # appears when the operator asked for Telegram.
-        if source not in ("instagram", "tiktok", "telegram"):
+        # Telegram is evidence, not creators: its public channels are almost
+        # always organisations — a club, a shop, an association — and showed
+        # up as the only "creators" in a people search. Its posts stay as
+        # sources.
+        if source not in ("instagram", "tiktok"):
             continue
         handle = (getattr(item, "author", "") or "").strip().lstrip("@")
         if not handle:
@@ -3790,6 +3792,51 @@ A TAG THAT ONLY REPEATS THE REQUEST NARROWS TO NOTHING. The search already cover
 RETURN FEW. Two or three tags that really place this account beat ten that merely surround it, and one bad tag pulls in thousands of strangers — a sweep of reach tags returned a Maruti Suzuki, two dogs and a nail salon for "creators like @iamhamamat". An empty list is a fine answer when the account only posts reach tags."""
 
 
+INSTAGRAM_TAG_SYSTEM = """You are shown the hashtags about to be scraped on Instagram for a request. Instagram can only be searched by hashtag, and a tag returns whoever posted under it, anywhere in the world. Say which tags are worth scraping.
+
+A tag is worth scraping when the people posting under it are likely to BE the kind of accounts the request asks for, in the place it asks for.
+
+A tag is not worth scraping when it narrows nothing: a tag everyone in a field uses worldwide, a bare place name that news, shops and tourists post under, or a platform's reach tag. Those return the whole platform, not the people asked for.
+
+JUDGE THE TAG IN THIS REQUEST. There is no list of bad words: a tag that is reach in one request can be the right community in another. Ask what posting under it would say about an account, given what was asked.
+
+Return JSON only: {"scrape": ["tag", ...]} using only tags from the list, spelled exactly as given. Keep the ones worth it; an empty list when none are."""
+
+
+def _instagram_tags_worth_scraping(tags: List[str], topic: str, *, settings) -> List[str]:
+    """The tags worth scraping on Instagram for this request. Empty on any
+    failure or when none are judged worth it — the caller then keeps the
+    tags it had, exactly as before this check existed."""
+    if not tags:
+        return []
+    try:
+        client = OpenAI(api_key=settings.openai_api_key)
+        response = client.chat.completions.create(
+            model=getattr(settings, "grounding_model", "gpt-4o-mini"),
+            messages=[
+                {"role": "system", "content": INSTAGRAM_TAG_SYSTEM},
+                {"role": "user", "content": (
+                    f"The request: {topic}\n\nHashtags:\n" + "\n".join("- " + t for t in tags)
+                )},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+            timeout=float(getattr(settings, "search_timeout", 15.0)),
+        )
+        parsed = extract_json_object(response.choices[0].message.content or "")
+    except Exception as exc:
+        _log_failure("web grounding: could not weigh the Instagram tags: %s", exc, exc=exc)
+        return []
+    allowed = {t.lower(): t for t in tags}
+    kept: List[str] = []
+    for raw in (parsed or {}).get("scrape") or []:
+        tag = allowed.get(str(raw or "").lstrip("#").strip().lower())
+        if tag and tag not in kept:
+            kept.append(tag)
+    logger.info("web grounding: Instagram tags %s -> scraping %s", tags, kept or "the original (none judged worth it)")
+    return kept
+
+
 def _tags_worth_sweeping(
     tags: List[str], handles: Sequence[str], topic: str, *, settings
 ) -> List[str]:
@@ -3959,6 +4006,32 @@ def _chosen_lanes(filters_job, settings) -> List[str]:
     return lanes
 
 
+def _where_seeds_were_found(seeds, history) -> List[str]:
+    """The searches in this session whose results included a seed account —
+    the latest first, each once. [] when there are no seeds or none showed up."""
+    wanted = {str(s).lstrip("@").strip().casefold() for s in (seeds or []) if s}
+    if not wanted:
+        return []
+    found: List[str] = []
+    for turn in reversed(list(history or [])):
+        if _role_of_turn(turn) != "assistant":
+            continue
+        try:
+            stored = json.loads(_content_of_turn(turn))
+        except ValueError:
+            continue
+        if not isinstance(stored, dict):
+            continue
+        handles = {
+            str(c.get("handle") or "").casefold()
+            for c in stored.get("creators") or [] if isinstance(c, dict)
+        }
+        searched = str(stored.get("searched_for") or "").strip()
+        if searched and handles & wanted and searched not in found:
+            found.append(searched)
+    return found[:3]
+
+
 def _research_via_engine(
     *,
     prompt: str,
@@ -4010,8 +4083,15 @@ def _research_via_engine(
             context=_plan_context_for(answer, query.text, typed_hashtags),
             answer=answer,
         )
+        # What the session already knows about the accounts to be like: the
+        # search each one turned up in. Their own posts can say nothing — no
+        # captions, a real-estate advert — and then the tags were invented
+        # (#modestfashion, for a tech worker found under #ethiopiantech).
+        found_in = _where_seeds_were_found(seeds, history)
         targets = orchestrator.resolve_targets(
-            query.text, provider=client, model=model,
+            query.text + (f" (the accounts to be like were found in a search for: "
+                          f"{'; '.join(found_in)})" if found_in else ""),
+            provider=client, model=model,
         )
         # The tags the operator typed, ahead of anything guessed. They listed
         # eight and the planner kept three of them, having re-derived its own
@@ -4086,6 +4166,15 @@ def _research_via_engine(
                     if t and t.lower() not in known
                 ]
                 targets["hashtags"] = (seed_tags + planned_tags)[:10]
+        # Instagram is searched by hashtag only and returns whoever posted under
+        # the tag, worldwide: #programming and #somalia brought in a US rapper,
+        # a manga artist and foreign news pages. Each tag is weighed first.
+        if "instagram" in lanes and targets.get("hashtags"):
+            checked = _instagram_tags_worth_scraping(
+                targets["hashtags"], query.text, settings=settings,
+            )
+            if checked:
+                targets["instagram_hashtags"] = checked
         planned = [s for s in {s for sq in plan.subqueries for s in sq.sources}]
         emit(
             "searching",
@@ -4689,7 +4778,12 @@ def gather_web_context(
         # thread: "who is sarkodie?" after "creators similar to @khaby.lame"
         # made Sarkodie the account to be like. The words of THIS message,
         # and the router's reading of it, still count.
-        or (not _is_new_question
+        #
+        # Nor does a question about people already on screen: "does he have an
+        # instagram account?" after "creators similar to him" became a hunt for
+        # others like him, with a paid Instagram scrape. Only a message that
+        # carries the research on — "instagram", "yes", "more" — inherits it.
+        or (_kind not in ("new_question", "about_results")
             and any(accounts_are_references(t) for t in _earlier))
     ):
         seen_seed = set()

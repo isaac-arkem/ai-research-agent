@@ -190,6 +190,9 @@ def test_nothing_about_any_brief_is_written_into_the_prompt():
     assert "Never invent" in prompt
     assert "never merge two groups" in prompt
     assert "overrides the brief" in prompt
+    # Tracks research the people; creators come later, from the concepts.
+    assert "RESEARCH QUESTION about the group's people, never a creator search" in prompt
+    assert "Never ask to find creators or accounts" in prompt
 
 
 # ── the endpoints ───────────────────────────────────────────────────

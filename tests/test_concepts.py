@@ -46,7 +46,7 @@ def test_a_concept_keeps_its_fields_and_checked_evidence():
     assert c.occupation == "" and c.interests == ""   # no source informed them
     assert [e.source for e in c.evidence] == [1, 2]
     # Built from the fields, never the model's sentence.
-    assert c.creator_search == "Find Ethiopian creators aged teenagers in Ethiopia"
+    assert c.creator_search == "Find Ethiopian content creators and influencers in Ethiopia, aged teenagers"
 
 
 def test_a_quote_matches_despite_punctuation_and_case():
@@ -102,6 +102,7 @@ def test_no_sources_or_a_failed_call_builds_nothing():
 def test_only_what_the_sources_say_is_in_the_prompt():
     prompt = concepts_service.CONCEPTS_SYSTEM
     assert "ORDINARY KIND OF PERSON" in prompt
+    assert "never a category of work" in prompt   # "menial jobs" is not a person
     assert "creator_search" not in prompt   # written in code, not by the model
     assert "ONLY WHAT THE SOURCES SAY" in prompt
     assert "COPIED EXACTLY" in prompt
@@ -212,10 +213,80 @@ def test_concepts_name_the_country_not_the_region():
     assert "one search per country" in concepts_service.COVERAGE_SYSTEM
 
 
-def test_find_creators_searches_for_who_the_people_are():
-    assert concepts_service.creator_search("Ethiopian", "Tech professionals", "25-40", "Ethiopia") == \
-        "Find Ethiopian tech professionals aged 25-40 in Ethiopia"
-    assert concepts_service.creator_search("Ethiopian", "Tech professionals", "25-40") == \
-        "Find Ethiopian tech professionals aged 25-40"
-    assert concepts_service.creator_search("Ethiopian", "", "25-40") == "Find Ethiopian creators aged 25-40"
-    assert concepts_service.creator_search("Somali", "Mechanics", "") == "Find Somali mechanics"
+def test_find_creators_is_worded_as_a_search_for_creators():
+    """Worded as a labour question, the web search returned job boards."""
+    assert concepts_service.creator_search("Ethiopian", "Tech workers", "25-30", "Ethiopia") == \
+        "Find Ethiopian content creators and influencers in Ethiopia who are tech workers, aged 25-30"
+    assert concepts_service.creator_search("Somali", "", "30-35", "Somalia") == \
+        "Find Somali content creators and influencers in Somalia, aged 30-35"
+    assert concepts_service.creator_search("", "", "", "") == "Find content creators and influencers"
+
+
+def _people(occupation):
+    return Concept(title="t", ethnicity="Somali", age_range="30-35", home_country="Somalia",
+                   occupation=occupation, evidence=[ConceptEvidence(source=1, quote="x" * 10)],
+                   creator_search=concepts_service.creator_search("Somali", occupation, "30-35", "Somalia"))
+
+
+def _says(payload):
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content=json.dumps(payload)))]))))
+
+
+def test_a_job_that_is_not_a_trade_is_dropped_from_the_search():
+    """ "occupation: asylum seekers" is a situation, not people's work."""
+    concepts = [_people("drivers"), _people("asylum seekers"), _people("")]
+    with patch("app.services.concepts.OpenAI", return_value=_says({"trades": [True, False]})):
+        out = concepts_service.keep_only_trades(concepts, openai_key="sk", model="m")
+    assert out[0].creator_search == "Find Somali content creators and influencers in Somalia who are drivers, aged 30-35"
+    assert out[1].occupation == ""
+    assert out[1].creator_search == "Find Somali content creators and influencers in Somalia, aged 30-35"
+    assert out[2] is concepts[2]          # nothing to check
+
+
+def test_a_failed_or_mismatched_trade_check_changes_nothing():
+    concepts = [_people("asylum seekers")]
+    with patch("app.services.concepts.OpenAI", side_effect=RuntimeError("down")):
+        assert concepts_service.keep_only_trades(concepts, openai_key="sk", model="m") == concepts
+    with patch("app.services.concepts.OpenAI", return_value=_says({"trades": [False, True]})):
+        assert concepts_service.keep_only_trades(concepts, openai_key="sk", model="m") == concepts
+
+
+def test_concepts_are_the_groups_own_people_never_victims():
+    prompt = concepts_service.CONCEPTS_SYSTEM
+    assert "ONLY THE GROUP'S PEOPLE" in prompt
+    assert 'never "victims"' in prompt
+
+
+def _from(home):
+    return Concept(title=f"People from {home}", home_country=home,
+                   evidence=[ConceptEvidence(source=1, quote="x" * 10)])
+
+
+def test_concepts_from_outside_the_group_are_dropped_in_code():
+    """Told "only the group's people", the model still wrote a Kenyan concept."""
+    concepts = [_from("Ethiopia"), _from("Kenya"), _from("somalia"), _from(""), _from("Ethiopia (Oromia)")]
+    kept = concepts_service.from_the_group(concepts, ["Ethiopia", "Eritrea", "Somalia", "Djibouti"])
+    assert [c.home_country for c in kept] == ["Ethiopia", "somalia", "", "Ethiopia (Oromia)"]
+    # A group that names no place filters nothing.
+    assert concepts_service.from_the_group(concepts, []) == concepts
+
+
+def test_the_groups_countries_come_from_the_model_and_reach_the_concepts():
+    calls = []
+
+    def create(**kw):
+        calls.append(kw["messages"])
+        content = (json.dumps({"countries": ["Country A", "country a", "Country B"]})
+                   if len(calls) == 1 else json.dumps({"concepts": [_concept(home_country="Country Z")]}))
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    with patch("app.services.concepts.OpenAI", return_value=client):
+        out = build_concepts("q", "Group A", SOURCES, openai_key="sk", model="m")
+    assert "The group's people are from: Country A, Country B" in calls[1][1]["content"]
+    assert out == []          # its only concept was from Country Z
+    with patch("app.services.concepts.OpenAI", side_effect=RuntimeError("down")):
+        assert concepts_service.group_countries("G", openai_key="sk", model="m") == []
+    assert "strict, narrow sense" in concepts_service.GROUP_COUNTRIES_SYSTEM

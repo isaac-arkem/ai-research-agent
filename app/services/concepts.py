@@ -55,12 +55,14 @@ CONCEPTS_SYSTEM = """You read the sources a research search returned about one g
 
 A concept is an ORDINARY KIND OF PERSON — the kind of person these stories show being targeted — described so a researcher can look for real creators like them in the region. It is not a scammer and not a victim's story: the stories only inform it. "Young Ethiopian Mechanics" is a concept: everyday people with a trade, an age, a place they live and things they want.
 
+ONLY THE GROUP'S PEOPLE. Every concept is people who belong to the group you are given — from the place the group is from. The sources also describe others; leave them out. A concept's title names ordinary people by who they are and what they do — "Young Ethiopian Mechanics" — never "victims", "scam" or what happened to them.
+
 Aim for 10 to 20 distinct concepts, more when the sources support more. Never invent one to reach a number. Distinct means the people differ — in ethnicity, age, trade, where they live, what drives them.
 
 For each concept:
 - title: a short name for the people — "Young Ethiopian Mechanics";
 - age_range: their age range, from the ages the sources give;
-- occupation: the trade or work they do;
+- occupation: the people, named by their trade — a plural noun for the people who do the work ("cleaners", "construction labourers", "drivers", "tech professionals"), never a category of work or a situation ("menial jobs", "job opportunities", "unemployed");
 - job_ads: the kinds of job advertisements people like them apply to — the offers the sources show them answering;
 - market: the country they live in now, where their creators will be searched;
 - address: the city or area within it, when a source gives one;
@@ -179,16 +181,129 @@ def _text(value, limit: int = 300) -> str:
 
 
 def creator_search(ethnicity: str, occupation: str, age_range: str, home_country: str = "") -> str:
-    """The search Find creators runs: who the people are and the country they
-    are from, nothing else — "Find Ethiopian tech professionals aged 25-40 in
-    Ethiopia". The country is what sets the country filter.
+    """The search Find creators runs: PEOPLE, worded the way pages that list
+    creators are written — "Find Ethiopian content creators and influencers in
+    Ethiopia who are tech workers, aged 25-30".
 
-    Built here from the concept's own fields rather than written by the model,
-    which kept adding what they were "discussing" — scams, asylum.
+    Worded as a labour question ("…living in Ethiopia (occupation: tech
+    workers)"), the web search returned job boards and workforce reports;
+    worded like this it returned "Top 20 Ethiopian Influencers" and "Tech
+    Influencer in Ethiopia". Creators is always the subject — never the job.
+    Built here from the concept's fields, not written by the model.
     """
-    who = " ".join(p for p in (ethnicity.strip(), (occupation.strip() or "creators").lower()) if p)
-    age, home = age_range.strip(), home_country.strip()
-    return f"Find {who}" + (f" aged {age}" if age else "") + (f" in {home}" if home else "")
+    who = " ".join(p for p in (ethnicity.strip(), "content creators and influencers") if p)
+    age, home, job = age_range.strip(), home_country.strip(), occupation.strip()
+    return (
+        f"Find {who}"
+        + (f" in {home}" if home else "")
+        + (f" who are {job.lower()}" if job else "")
+        + (f", aged {age}" if age else "")
+    )
+
+
+TRADE_CHECK_SYSTEM = """For each numbered entry, say whether it names people by a trade or kind of work they do — "cleaners", "tech workers", "drivers" are; "asylum seekers", "varied", "job seekers", "menial jobs", "unemployed" are not.
+
+Return JSON only: {"trades": [true, false, ...]} — one answer per entry, in order."""
+
+
+GROUP_COUNTRIES_SYSTEM = """You are given a group of people from a research brief. List the countries the people of this group are FROM — their origin, not where they are now.
+
+Read a region in its strict, narrow sense — the core countries the name means — never a wider or extended grouping that some organisations use. When the group names no place of origin, return an empty list.
+
+Return JSON only: {"countries": ["..."]}"""
+
+
+def group_countries(group: str, *, openai_key: str, model: str, timeout: float = 30.0) -> List[str]:
+    """The countries a track's group comes from, [] when it names none or the
+    call fails — then no concept is dropped for its country."""
+    try:
+        client = OpenAI(api_key=openai_key, timeout=timeout)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": GROUP_COUNTRIES_SYSTEM},
+                {"role": "user", "content": f"The group: {group}"},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        parsed = extract_json_object(response.choices[0].message.content or "") or {}
+    except Exception as exc:
+        logger.warning("concepts: countries for %r failed: %s", group, exc)
+        return []
+    raw = parsed.get("countries") if isinstance(parsed.get("countries"), list) else []
+    out: List[str] = []
+    for value in raw:
+        text = _text(value, 80)
+        if text and text.casefold() not in {c.casefold() for c in out}:
+            out.append(text)
+    return out
+
+
+def from_the_group(concepts: List[Concept], countries: Sequence[str]) -> List[Concept]:
+    """Only the concepts whose people come from the group's countries.
+
+    A code check, not an instruction: told "only the group's people", the
+    model still wrote a Kenyan concept into a Horn of Africa track. A concept
+    with no From country is kept — nothing shows it is outside the group.
+    """
+    if not countries:
+        return concepts
+    allowed = {_norm(c) for c in countries}
+    kept, dropped = [], []
+    for concept in concepts:
+        home = _norm(concept.home_country)
+        if not home or home in allowed or any(a and a in home for a in allowed):
+            kept.append(concept)
+        else:
+            dropped.append(concept)
+    if dropped:
+        logger.info("concepts: dropped %d from outside %s: %s", len(dropped), list(countries),
+                    [f"{c.title} ({c.home_country})" for c in dropped])
+    return kept
+
+
+def keep_only_trades(concepts: List[Concept], *, openai_key: str, model: str,
+                     timeout: float = 30.0) -> List[Concept]:
+    """Clear a concept's occupation when it is not a trade, so Find creators
+    searches the people alone ("Find Somali creators aged 30-35 living in
+    Somalia") instead of a situation ("occupation: asylum seekers").
+
+    One call for every concept. On any failure the concepts are kept as they
+    are — the search is still about people, only less exact.
+    """
+    asked = [i for i, c in enumerate(concepts) if c.occupation.strip()]
+    if not asked:
+        return concepts
+    try:
+        client = OpenAI(api_key=openai_key, timeout=timeout)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": TRADE_CHECK_SYSTEM},
+                {"role": "user", "content": "\n".join(
+                    f"{n}. {concepts[i].occupation}" for n, i in enumerate(asked, start=1)
+                )},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        answers = (extract_json_object(response.choices[0].message.content or "") or {}).get("trades")
+    except Exception as exc:
+        logger.warning("concepts: trade check failed, occupations kept: %s", exc)
+        return concepts
+    if not isinstance(answers, list) or len(answers) != len(asked):
+        logger.warning("concepts: trade check gave %r for %d entries, occupations kept", answers, len(asked))
+        return concepts
+    out = list(concepts)
+    for i, is_trade in zip(asked, answers):
+        if is_trade is False:
+            c = out[i]
+            out[i] = c.model_copy(update={
+                "occupation": "",
+                "creator_search": creator_search(c.ethnicity, "", c.age_range, c.home_country),
+            })
+    return out
 
 
 def parse_concepts(parsed: dict, findings: Sequence[WebFinding]) -> List[Concept]:
@@ -231,11 +346,13 @@ def build_concepts(
     openai_key: str,
     model: str,
     timeout: float = 120.0,
+    check_model: str = "",
 ) -> List[Concept]:
     """Concepts for one track from its sources. [] when there are no sources
     or the model fails — the turn's other results stand on their own."""
     if not findings:
         return []
+    homes = group_countries(group, openai_key=openai_key, model=check_model or model)
     try:
         client = OpenAI(api_key=openai_key, timeout=timeout)
         response = client.chat.completions.create(
@@ -243,7 +360,9 @@ def build_concepts(
             messages=[
                 {"role": "system", "content": CONCEPTS_SYSTEM},
                 {"role": "user", "content": (
-                    f"The group: {group}\nThe search: {question}\n\nSources:\n\n"
+                    f"The group: {group}\n"
+                    + (f"The group's people are from: {', '.join(homes)}\n" if homes else "")
+                    + f"The search: {question}\n\nSources:\n\n"
                     + numbered_sources(findings)
                 )},
             ],
@@ -254,7 +373,10 @@ def build_concepts(
     except Exception as exc:
         logger.warning("concepts: building for %r failed: %s", group, exc)
         return []
-    concepts = parse_concepts(parsed, findings)
+    concepts = keep_only_trades(
+        from_the_group(parse_concepts(parsed, findings), homes),
+        openai_key=openai_key, model=check_model or model,
+    )
     proposed = len(parsed.get("concepts") or []) if isinstance(parsed, dict) else 0
     logger.info("concepts: %d of %d proposed for %r kept with checked evidence",
                 len(concepts), proposed, group)

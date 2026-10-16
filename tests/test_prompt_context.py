@@ -196,3 +196,31 @@ def test_the_prompt_says_what_assumptions_are_for():
     assert "The operator wants to scrape the TikTok account of @isaac" in prompt
     # an empty array is a valid answer, not a gap to pad
     assert "return an empty array" in prompt
+
+
+def test_the_planner_gets_each_turns_sources_without_the_screen_copies():
+    """The cards' copies of the sources, creators and concepts duplicated
+    web_results and took one session over the model's limit."""
+    import json as _json
+
+    from app.services.prompt import build_chat_messages
+
+    stored = _json.dumps({
+        "clarifying_question": "Plan it?", "understood_so_far": "Found 3.",
+        "web_results": "```findings\n[1] page — @creator1 #tag\n```",
+        "findings": [{"title": "page", "url": "u"}], "creators": [{"name": "c", "handle": "creator1"}],
+        "concepts": [{"title": "k"}], "hashtags": [{"tag": "tag"}], "filters": {"countries": ["SO"]},
+    }, ensure_ascii=False)
+    plain = _json.dumps({"clarifying_question": "Which platform?", "missing_fields": ["platform"]})
+    history = [
+        {"role": "user", "content": "find creators"},
+        {"role": "assistant", "content": stored},
+        {"role": "assistant", "content": plain},
+        {"role": "assistant", "content": "not json"},
+    ]
+    messages = build_chat_messages("system", "yes", history)
+    sent = _json.loads(messages[2]["content"])
+    assert set(sent) == {"clarifying_question", "understood_so_far", "web_results", "hashtags", "filters"}
+    assert "@creator1" in sent["web_results"]
+    assert messages[3]["content"] == plain          # untouched, byte for byte
+    assert messages[4]["content"] == "not json"

@@ -4744,3 +4744,32 @@ def test_the_instagram_display_name_is_kept_from_the_actor_payload():
     )
     assert mapped["author_nickname"] == "Jen Stockwell"
     assert _map_instagram_item({"id": "2"}, "thailand")["author_nickname"] == ""
+
+
+def test_the_searches_a_seed_turned_up_in_are_found_in_the_session():
+    """His own posts said nothing, so the tags were invented (#modestfashion
+    for a tech worker found under #ethiopiantech)."""
+    import json as _json
+    from app.models.domain import ChatTurn
+    from app.services.grounding import _where_seeds_were_found
+
+    def answer(searched, handles):
+        return ChatTurn(role="assistant", content=_json.dumps({
+            "searched_for": searched, "creators": [{"name": h, "handle": h} for h in handles]}))
+
+    history = [
+        answer("Ethiopian tech workers", ["Haileab_Ameha", "other"]),
+        ChatTurn(role="user", content="more"),
+        answer("Somali creators", ["someone"]),
+        answer("Ethiopian tech workers", ["haileab_ameha"]),
+    ]
+    assert _where_seeds_were_found(["@haileab_ameha"], history) == ["Ethiopian tech workers"]
+    assert _where_seeds_were_found([], history) == []
+    assert _where_seeds_were_found(["nobody"], history) == []
+
+
+def test_the_targeting_example_is_a_format_not_a_niche():
+    from app.services.research.orchestrator import TARGETING_PROMPT
+
+    assert "Never take its niche" in TARGETING_PROMPT
+    TARGETING_PROMPT.format(topic="t")     # still a valid template

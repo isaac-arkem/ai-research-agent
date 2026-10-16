@@ -260,6 +260,7 @@ def generate_research_plan(
                 concepts = concept_service.build_concepts(
                     sanitized, concepts_for, sources,
                     openai_key=openai_key, model=concept_model,
+                    check_model=getattr(settings, "grounding_model", "") or concept_model,
                 )
             return AgentResult(
                 ok=True,
